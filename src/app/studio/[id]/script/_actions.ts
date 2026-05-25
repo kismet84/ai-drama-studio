@@ -225,22 +225,27 @@ export async function generateEpisodeOutlines(logline: string, storyOutline: str
   return episodes.length > 0 ? episodes : []
 }
 
-export async function generateSceneOutlines(episodeOutlines: string, targetEpisode: number): Promise<SceneOutline[]> {
+export async function generateSceneOutlines(episodeOutlines: string, targetEpisode: number, durationSeconds: number = 300, aiGenSeconds: number = 10): Promise<SceneOutline[]> {
+  const sceneCount = Math.max(4, Math.round(durationSeconds / aiGenSeconds))
   const raw = await generateText(
-    `你是专业短剧编剧。为第${targetEpisode}集写6-10个场景分场大纲。本集信息：${episodeOutlines}。严格按以下格式：
+    `你是专业短剧编剧。为第${targetEpisode}集写${sceneCount}个场景的分场大纲。
 
+本集总时长${Math.floor(durationSeconds / 60)}分${durationSeconds % 60}秒，每个场景对应一次 AI 视频生成，单次生成约${aiGenSeconds}秒。
+所以需要 ${sceneCount} 个场景，每个场景 ${aiGenSeconds} 秒左右。
+
+本集信息：${episodeOutlines}
+
+严格按以下格式：
 ===SCENE===
 编号：1
 地点：场景地点
 人物：角色A,角色B
 概要：1-2句话描述本场景
 目的：这个场景推进了什么剧情
+时长：${aiGenSeconds}
 ===END===
 
-===SCENE===
-编号：2
-...
-===END===`
+每个场景时长统一为 ${aiGenSeconds} 秒，对应一次 AI 视频生成。`
   )
 
   const scenes: SceneOutline[] = []
@@ -260,9 +265,10 @@ export async function generateSceneOutlines(episodeOutlines: string, targetEpiso
     const chars = extract("人物").split(/[,，、]/).map((s) => s.trim()).filter(Boolean)
     const summary = extract("概要")
     const purpose = extract("目的")
+    const dur = parseInt(extract("时长")) || 0
 
     if (location || summary) {
-      scenes.push({ sceneNum: num, location, characters: chars, summary, purpose })
+      scenes.push({ sceneNum: num, location, characters: chars, summary, purpose, durationSeconds: dur })
     }
   }
 
@@ -270,7 +276,33 @@ export async function generateSceneOutlines(episodeOutlines: string, targetEpiso
 }
 
 export async function generateScriptContent(logline: string, sceneOutlines: string, characters: string): Promise<string> {
-  return generateText(`你是专业短剧编剧。简介：${logline}，分场：${sceneOutlines}，角色：${characters}。写出完整剧本正文，标准格式：场景标题→场景描述→对话（标情绪：愤怒/悲伤/开心/冷漠/霸道/温柔）。`)
+  return generateText(
+    `你是专业短剧编剧。以下分场大纲中每个场景都必须逐条编写剧本，不要合并、不要跳过、不要概括。
+
+简介：${logline}
+
+【分场大纲 - 必须逐条编写】
+${sceneOutlines}
+
+【角色信息】
+${characters}
+
+要求：
+1. 每个场景用 ===SCENE=== 标记开头，严格按大纲顺序逐条编写
+2. 每个场景包含：场景描述（1-2句）→ 对话（标情绪标签：愤怒/悲伤/开心/冷漠/霸道/温柔）
+3. 对话简短有力，每句不超过 20 字
+4. 每个场景 2-4 句对话即可
+5. 总共输出场景数必须等于大纲中的场景数
+
+输出格式：
+===SCENE 1===
+场景描述：XXX
+角色A（情绪）：台词
+角色B（情绪）：台词
+===SCENE 2===
+场景描述：XXX
+...`
+  )
 }
 
 export async function generateReview(fullScript: string, logline: string, spec?: ReviewSpec): Promise<string> {

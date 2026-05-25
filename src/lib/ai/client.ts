@@ -348,12 +348,22 @@ export async function generateImage(
 const MINIMAX_VOICES: Record<string, string> = {
   gentleman: 'Chinese_(Mandarin)_Gentleman',
   sincere: 'Chinese_(Mandarin)_Sincere_Adult',
-  deep_male: 'Chinese_(Mandarin)_Deep_Male',
-  warm_boy: 'Chinese_(Mandarin)_Warm_Boy',
-  sweet_girl: 'Chinese_(Mandarin)_Sweet_Girl',
-  cute_girl: 'Chinese_(Mandarin)_Cute_Girl',
-  tv_anchor: 'Chinese_(Mandarin)_TV_Anchor',
+  deep_male: 'male-qn-badao',
+  warm_boy: 'male-qn-daxuesheng',
+  sweet_girl: 'female-shaonv',
+  cute_girl: 'female-tianmei',
+  tv_anchor: 'Chinese_(Mandarin)_News_Anchor',
   lyrical: 'Chinese_(Mandarin)_Lyrical_Voice',
+  yujie: 'female-yujie',
+  chengshu: 'female-chengshu',
+  jingying: 'male-qn-jingying',
+  qingse: 'male-qn-qingse',
+  badao_shaoye: 'badao_shaoye',
+  junlang: 'junlang_nanyou',
+  wumei: 'wumei_yujie',
+  clever_boy: 'clever_boy',
+  cute_boy: 'cute_boy',
+  lovely_girl: 'lovely_girl',
 }
 
 /** 情绪 → MiniMax 音色映射 */
@@ -380,10 +390,11 @@ export async function generateSpeech(
 ): Promise<{ audioBase64: string; duration: number }> {
   const provider = process.env.TTS_PROVIDER || 'openai'
 
-  // ===== MiniMax Speech-2.6 =====
+  // ===== MiniMax TTS (via MCP-compatible API) =====
   if (provider === 'minimax') {
     const apiKey = process.env.MINIMAX_API_KEY
     if (!apiKey) throw new Error('MINIMAX_API_KEY not set')
+    const apiHost = process.env.MINIMAX_API_HOST || 'https://api.minimaxi.com'
 
     let voiceId = MINIMAX_VOICES['sweet_girl']
     if (options.voice && MINIMAX_VOICES[options.voice]) {
@@ -394,11 +405,9 @@ export async function generateSpeech(
     }
 
     const body = {
-      model: 'speech-2.6-turbo',
+      model: 'speech-2.8-turbo',
       text,
       stream: false,
-      language_boost: 'auto',
-      output_format: 'hex',
       voice_setting: {
         voice_id: voiceId,
         speed: options.speed ?? 1,
@@ -413,14 +422,15 @@ export async function generateSpeech(
       },
     }
 
-    const response = await fetch('https://api.minimax.io/v1/t2a_v2', {
+    const response = await fetch(`${apiHost}/v1/t2a_v2`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
+        'MM-API-Source': 'Drama-Studio',
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(30000),
+      signal: AbortSignal.timeout(60000),
     })
 
     if (!response.ok) {
@@ -444,34 +454,38 @@ export async function generateSpeech(
     return { audioBase64, duration }
   }
 
-  // ===== OpenAI TTS =====
-  if (provider === 'openai') {
-    const voice = options.voice || 'alloy'
-    const response = await fetch('https://api.openai.com/v1/audio/speech', {
+  // ===== SiliconFlow TTS (CosyVoice2) =====
+  if (provider === 'siliconflow') {
+    const apiKey = process.env.SILICONFLOW_API_KEY
+    if (!apiKey) throw new Error('SILICONFLOW_API_KEY not set')
+
+    const voice = options.voice || 'FunAudioLLM/CosyVoice2-0.5B:anna'
+    const body: Record<string, unknown> = {
+      model: 'FunAudioLLM/CosyVoice2-0.5B',
+      input: text,
+      voice,
+      response_format: 'mp3',
+      speed: options.speed ?? 1,
+      gain: 0,
+    }
+
+    const response = await fetch('https://api.siliconflow.cn/v1/audio/speech', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Authorization': `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({
-        model: 'tts-1',
-        input: text,
-        voice,
-        speed: options.speed ?? 1.0,
-        response_format: 'mp3',
-      }),
-      signal: AbortSignal.timeout(30000),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60000),
     })
 
     if (!response.ok) {
-      throw new Error(`TTS failed: ${await response.text()}`)
+      throw new Error(`SiliconFlow TTS failed (${response.status}): ${await response.text()}`)
     }
 
     const arrayBuffer = await response.arrayBuffer()
-    const base64 = Buffer.from(arrayBuffer).toString('base64')
-    const duration = text.length / 4
-
-    return { audioBase64: base64, duration }
+    const audioBase64 = Buffer.from(arrayBuffer).toString('base64')
+    return { audioBase64, duration: text.length / 4 }
   }
 
   throw new Error(`Unsupported TTS provider: ${provider}`)

@@ -202,7 +202,8 @@ export interface SceneOutline {
   location: string
   characters: string[]
   summary: string
-  purpose: string     // 本场景推进了什么剧情
+  purpose: string
+  durationSeconds: number  // 本场景预计时长（秒）
 }
 
 // ========================
@@ -276,6 +277,8 @@ export interface ScriptWizardData {
   // Step 9 - 分场大纲
   activeSceneEpisode?: number
   episodeSceneOutlines?: Record<number, SceneOutline[]>
+  episodeDurationSeconds?: number  // 每集时长（秒），默认 300（5分钟）
+  aiGenerationDuration?: number    // AI单次生成时长（秒），默认 10（匹配主流工具 5-15s）
   // Step 10 - 剧本正文
   activeEpisode?: number
   episodeScripts?: Record<number, string>

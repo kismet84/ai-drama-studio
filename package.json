@@ -2,11 +2,11 @@
   "name": "drama-studio",
   "version": "0.1.0",
   "private": true,
-  "scripts": {
+"scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "mcp": "cross-env MINIMAX_API_KEY=%MINIMAX_API_KEY% MINIMAX_API_HOST=https://api.minimaxi.com MINIMAX_MCP_BASE_PATH=./output minimax-mcp-js --mode rest --port 3456"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.65",
@@ -25,6 +25,7 @@
     "clsx": "^2.1.1",
     "dotenv": "^17.4.2",
     "lucide-react": "^1.16.0",
+    "minimax-mcp-js": "^0.0.17",
     "next": "16.2.6",
     "openai": "^6.39.0",
     "prisma": "^5.22.0",
