@@ -1,0 +1,215 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ========================
+// 项目管理
+// ========================
+
+model Project {
+  id          String   @id @default(uuid())
+  title       String
+  description String?
+  thumbnail   String?
+  status      String   @default("draft") // draft, in_progress, completed, published
+  genre       String?  // 题材：霸总、甜宠、逆袭、悬疑、古装...
+  scriptData  String?  // 10步创作工作流 JSON 数据（选题/简介/世界观/人设/悬念/大纲/分集/分场/剧本/复盘）
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  episodes    Episode[]
+  characters  Character[]
+  assets      Asset[]
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ========================
+// 剧集
+// ========================
+
+model Episode {
+  id          String   @id @default(uuid())
+  projectId   String
+  episodeNum  Int
+  title       String
+  status      String   @default("draft") // draft, script_done, visual_done, voice_done, composited, published
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  scripts     Script[]
+  scenes      Scene[]
+  compositions Composition[]
+
+  @@unique([projectId, episodeNum])
+  @@index([projectId])
+}
+
+// ========================
+// 剧本 - 支持多版本
+// ========================
+
+model Script {
+  id          String   @id @default(uuid())
+  episodeId   String
+  version     Int      @default(1)
+  content     String   // 完整剧本内容（JSON）
+  wordCount   Int      @default(0)
+  sceneCount  Int      @default(0)
+  aiModel     String?  // 使用的AI模型
+  aiPrompt    String?  // 生成时用的提示词
+  status      String   @default("draft")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  episode     Episode  @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  scenes      Scene[]
+
+  @@index([episodeId])
+}
+
+// ========================
+// 场景/分镜
+// ========================
+
+model Scene {
+  id          String   @id @default(uuid())
+  episodeId   String
+  scriptId    String?
+  sceneNum    Int
+  location    String?  // 场景地点
+  timeOfDay   String?  // 白天/夜晚
+  description String   // 场景描述
+  duration    Int      @default(10) // 预计时长（秒）
+  status      String   @default("pending") // pending, generating, generated, failed
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  episode     Episode     @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  script      Script?     @relation(fields: [scriptId], references: [id], onDelete: SetNull)
+  shots       Shot[]
+  dialogues   Dialogue[]
+
+  @@index([episodeId])
+  @@index([scriptId])
+}
+
+// ========================
+// 镜头
+// ========================
+
+model Shot {
+  id          String   @id @default(uuid())
+  sceneId     String
+  shotNum     Int
+  cameraAngle String?  // 镜头角度：特写、中景、远景、俯拍...
+  description String   // 镜头描述
+  imageUrl    String?  // 生成的画面URL
+  videoUrl    String?  // 生成的视频URL
+  duration    Int      @default(5) // 时长（秒）
+  aiModel     String?  // 使用的AI模型
+  aiPrompt    String?  // 生成时用的提示词
+  status      String   @default("pending")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  scene       Scene     @relation(fields: [sceneId], references: [id], onDelete: Cascade)
+
+  @@index([sceneId])
+}
+
+// ========================
+// 台词
+// ========================
+
+model Dialogue {
+  id          String   @id @default(uuid())
+  sceneId     String
+  characterId String?
+  speaker     String   // 说话人名字
+  line        String   // 台词内容
+  emotion     String?  // 情绪：愤怒、悲伤、开心、冷漠...
+  audioUrl    String?  // 配音音频URL
+  duration    Float?   // 音频时长（秒）
+  order       Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  scene       Scene     @relation(fields: [sceneId], references: [id], onDelete: Cascade)
+  character   Character? @relation(fields: [characterId], references: [id], onDelete: SetNull)
+
+  @@index([sceneId])
+}
+
+// ========================
+// 角色
+// ========================
+
+model Character {
+  id          String   @id @default(uuid())
+  projectId   String
+  name        String
+  role        String?  // 主角、反派、配角...
+  gender      String?  // male, female
+  age         String?
+  description String?  // 角色描述
+  avatarUrl   String?  // 角色头像
+  voiceId     String?  // 配音音色ID
+  voiceModel  String?  // 配音模型
+  promptRef   String?  // 生图参考提示词
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  dialogues   Dialogue[]
+
+  @@index([projectId])
+}
+
+// ========================
+// 合成/导出记录
+// ========================
+
+model Composition {
+  id          String   @id @default(uuid())
+  episodeId   String
+  videoUrl    String?  // 最终视频URL
+  resolution  String?  // 分辨率：720p, 1080p, 4k
+  format      String?  // 格式：mp4, mov
+  fileSize    Int?     // 文件大小（bytes）
+  duration    Float?   // 总时长（秒）
+  status      String   @default("processing") // processing, completed, failed
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  episode     Episode  @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+
+  @@index([episodeId])
+}
+
+// ========================
+// 素材库
+// ========================
+
+model Asset {
+  id          String   @id @default(uuid())
+  projectId   String?
+  type        String   // image, video, audio, bgm, sound_effect, template
+  name        String
+  url         String
+  thumbnail   String?
+  tags        String?  // JSON array of tags
+  metadata    String?  // JSON metadata
+  createdAt   DateTime @default(now())
+
+  project     Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@index([type])
+}
