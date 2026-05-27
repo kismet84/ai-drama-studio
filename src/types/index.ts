@@ -116,7 +116,7 @@ export interface ScriptGenResponse {
 // 10步创作工作流类型
 // ========================
 
-export type WizardStep = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10
+export type WizardStep = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 
 export const WIZARD_STEPS = [
   { step: 1 as WizardStep, title: "选题定赛道", desc: "确定故事方向" },
@@ -126,9 +126,8 @@ export const WIZARD_STEPS = [
   { step: 5 as WizardStep, title: "悬念+伏笔", desc: "悬疑引擎" },
   { step: 6 as WizardStep, title: "整体大纲", desc: "起承转合" },
   { step: 7 as WizardStep, title: "分集大纲", desc: "逐集拆解" },
-  { step: 8 as WizardStep, title: "复盘+过审", desc: "中间检查" },
-  { step: 9 as WizardStep, title: "分场大纲", desc: "场景级细化" },
-  { step: 10 as WizardStep, title: "剧本正文", desc: "正式写作" },
+  { step: 8 as WizardStep, title: "分场大纲", desc: "场景级细化" },
+  { step: 9 as WizardStep, title: "剧本正文", desc: "正式写作" },
 ] as const
 
 export const TOPIC_OPTIONS = [
@@ -171,6 +170,7 @@ export interface CharacterCard {
   weakness: string       // 弱点
   signature: string      // 标志性动作/台词
   relationship?: string  // 与其他角色的关系
+  locked?: boolean       // 已写入剧本正文，不可再编辑
 }
 
 export interface SuspenseItem {
@@ -179,6 +179,7 @@ export interface SuspenseItem {
   description: string
   revealEpisode?: number  // 在第几集揭晓
   status: "pending" | "revealed"
+  locked?: boolean         // 已写入剧本正文，不可再编辑/重新生成
 }
 
 export interface StoryOutline {
@@ -195,6 +196,7 @@ export interface EpisodeOutline {
   conflict: string    // 本集核心冲突
   hook: string        // 结尾钩子
   keyScenes: string[] // 关键场景列表
+  locked?: boolean    // 已写入剧本正文，不可再编辑/重新生成
 }
 
 export interface SceneOutline {
@@ -204,6 +206,7 @@ export interface SceneOutline {
   summary: string
   purpose: string
   durationSeconds: number  // 本场景预计时长（秒）
+  locked?: boolean         // 已写入剧本正文，不可再编辑/重新生成
 }
 
 // ========================
@@ -266,18 +269,22 @@ export interface ScriptWizardData {
   characters: CharacterCard[]
   // Step 5
   suspenseList: SuspenseItem[]
+  collapsedHookGroups?: number[]     // 折叠的钩子分组索引（每10集一组）
+  collapsedMediumSuspense?: boolean  // 中层悬念是否折叠
   // Step 6
   storyOutline?: StoryOutline
+  facts?: FactItem[]                  // AI 检索的参考事实/事件
   // Step 7
   episodeOutlines: EpisodeOutline[]
   totalEpisodes?: number
+  collapsedEpisodeGroups?: number[]  // 折叠的分集组索引（每10集一组，存到 data 中持久化）
   // Step 8 - 中间复盘
   reviewNotes?: string
   reviewSpec?: ReviewSpec
   // Step 9 - 分场大纲
   activeSceneEpisode?: number
   episodeSceneOutlines?: Record<number, SceneOutline[]>
-  episodeDurationSeconds?: number  // 每集时长（秒），默认 300（5分钟）
+  episodeDurationSeconds?: number  // 每集时长（秒），默认 270
   aiGenerationDuration?: number    // AI单次生成时长（秒），默认 10（匹配主流工具 5-15s）
   // Step 10 - 剧本正文
   activeEpisode?: number
@@ -294,6 +301,13 @@ export interface FixLogEntry {
   before: string          // 修改前摘要
   after: string           // 修改后摘要
 }
+
+export interface FactItem {
+  title: string
+  detail: string
+  relevance: string
+}
+
 // ========================
 // 通用 UI 类型
 // ========================

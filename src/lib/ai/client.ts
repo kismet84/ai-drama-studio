@@ -3,10 +3,17 @@
  * 
  * 设计原则：
  * 1. 所有 AI 调用通过此层统一管理
- * 2. 支持多 provider 切换（OpenAI / Anthropic / 国产模型）
- * 3. 内置重试、超时、错误处理
- * 4. API Key 通过环境变量管理
+ * 2. 模型专属提示词模板集中在 prompts.ts
  */
+
+import {
+  buildDeepSeekCharacterTurnaroundPrompt,
+  buildDeepSeekSceneShotPrompt,
+  buildDeepSeekDialogueExtractionPrompt,
+  buildDeepSeekCharacterInferencePrompt,
+  buildWanVideoPrompt,
+  WAN_NEGATIVE_PROMPT,
+} from "./prompts"
 
 // ========================
 // 类型定义
@@ -229,6 +236,84 @@ export async function generateStoryboard(
 }
 
 /**
+ * 角色形象英文描述生成（结合故事上下文）
+ */
+export async function generateCharacterTurnaround(
+  name: string,
+  description: string,
+  storyContext: string
+): Promise<string> {
+  const { system, user } = buildDeepSeekCharacterTurnaroundPrompt({ name, description, storyContext })
+
+  const prompt = await callAI(
+    [{ role: 'system', content: system }, { role: 'user', content: user }],
+    { temperature: 0.7, maxTokens: 800 }
+  )
+
+  return prompt.trim()
+}
+
+/**
+ * 从剧本全文提取对白（DeepSeek 通读分析）
+ */
+export async function extractScriptDialogue(
+  fullScript: string,
+  charactersDesc: string
+): Promise<{ sceneNum: number; speaker: string; line: string; emotion: string; isMonologue: boolean }[]> {
+  const { system, user } = buildDeepSeekDialogueExtractionPrompt({ fullScript, charactersDesc })
+
+  const prompt = await callAI(
+    [{ role: 'system', content: system }, { role: 'user', content: user }],
+    { temperature: 0.3, maxTokens: 4096, responseFormat: 'json' }
+  )
+
+  try {
+    const parsed = JSON.parse(prompt)
+    if (Array.isArray(parsed)) return parsed
+    return []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 自动推断龙套角色属性
+ */
+export async function inferCharacterAttributes(
+  names: string[],
+  scriptContext: string
+): Promise<{ name: string; suggestedName: string; gender: string; age: string; identity: string; personality: string; role: string }[]> {
+  const { system, user } = buildDeepSeekCharacterInferencePrompt({ names, scriptContext })
+
+  const prompt = await callAI(
+    [{ role: 'system', content: system }, { role: 'user', content: user }],
+    { temperature: 0.3, maxTokens: 1024, responseFormat: 'json' }
+  )
+
+  try { const parsed = JSON.parse(prompt); if (Array.isArray(parsed)) return parsed } catch {}
+  return []
+}
+
+/**
+ * 场景镜头画面提示词生成
+ */
+export async function generateSceneShotPrompt(
+  sceneSummary: string,
+  shotType: "wide" | "medium" | "close",
+  charactersDesc: string,
+  storyContext: string
+): Promise<string> {
+  const { system, user } = buildDeepSeekSceneShotPrompt(sceneSummary, shotType, charactersDesc, storyContext)
+
+  const prompt = await callAI(
+    [{ role: 'system', content: system }, { role: 'user', content: user }],
+    { temperature: 0.8, maxTokens: 600 }
+  )
+
+  return prompt.trim()
+}
+
+/**
  * 角色设计生成
  */
 export async function generateCharacterDesign(
@@ -260,6 +345,17 @@ export async function generateCharacterDesign(
 /**
  * 图片生成 - 支持 OpenAI DALL-E / MiniMax Image-01
  */
+/** 可选的图片生成模型 */
+export const IMAGE_MODELS = {
+  minimax: [
+    { id: "image-01", label: "MiniMax Image-01", desc: "通用写实风格，适合角色肖像" },
+    { id: "image-01-live", label: "MiniMax Image-01 Live", desc: "支持多种画风（漫画/水彩/中世纪等）" },
+  ],
+  openai: [
+    { id: "dall-e-3", label: "DALL·E 3", desc: "OpenAI 高质量图片生成" },
+  ],
+} as const
+
 export async function generateImage(
   prompt: string,
   options: {
@@ -267,21 +363,25 @@ export async function generateImage(
     height?: number
     negativePrompt?: string
     referenceImage?: string
+    model?: string
+    provider?: string
   } = {}
 ): Promise<string> {
-  const provider = process.env.IMAGE_PROVIDER || 'openai'
+  const provider = options.provider || process.env.IMAGE_PROVIDER || 'minimax'
 
-  // ===== MiniMax Image-01 =====
+  // ===== MiniMax =====
   if (provider === 'minimax') {
     const apiKey = process.env.MINIMAX_API_KEY
     if (!apiKey) throw new Error('MINIMAX_API_KEY not set')
 
     const aspectRatio = options.width && options.height
       ? options.width > options.height ? '16:9' : options.width < options.height ? '9:16' : '1:1'
-      : '16:9'
+      : '1:1'
+
+    const model = options.model || 'image-01'
 
     const body: Record<string, unknown> = {
-      model: 'image-01',
+      model,
       prompt,
       aspect_ratio: aspectRatio,
       n: 1,
@@ -292,7 +392,7 @@ export async function generateImage(
       body.subject_reference = [{ type: 'character', image_file: options.referenceImage }]
     }
 
-    const response = await fetch('https://api.minimax.io/v1/image_generation', {
+    const response = await fetch('https://api.minimaxi.com/v1/image_generation', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -307,9 +407,13 @@ export async function generateImage(
     }
 
     const data = await response.json()
+    // MiniMax 错误以 base_resp.status_code 返回，非 0 即失败
+    if (data.base_resp?.status_code !== 0) {
+      throw new Error(`MiniMax image error: ${data.base_resp?.status_msg || "unknown"} (code ${data.base_resp?.status_code})`)
+    }
     const urls = data.data?.image_urls
     if (urls && urls.length > 0) return urls[0]
-    throw new Error('MiniMax returned no image URL')
+    throw new Error(`MiniMax returned no image URL. Response: ${JSON.stringify(data).slice(0, 500)}`)
   }
 
   // ===== OpenAI DALL-E =====
@@ -489,6 +593,172 @@ export async function generateSpeech(
   }
 
   throw new Error(`Unsupported TTS provider: ${provider}`)
+}
+
+/**
+ * 视频生成 - MiniMax 图生视频（异步：创建任务 → 轮询 → 下载）
+ */
+export async function generateVideo(
+  prompt: string,
+  options: {
+    imageUrl?: string
+    duration?: number
+  } = {}
+): Promise<string> {
+  const provider = process.env.VIDEO_PROVIDER || "minimax"
+
+  // ===== SiliconFlow Wan-AI =====
+  if (provider === "siliconflow") {
+    const apiKey = process.env.SILICONFLOW_API_KEY
+    if (!apiKey) throw new Error("SILICONFLOW_API_KEY not set")
+
+    const model = "Wan-AI/Wan2.2-T2V-A14B"
+    // I2V 模型暂未开放，用 T2V + 将画面描述嵌入 prompt
+
+    const body: Record<string, unknown> = {
+      model,
+      prompt,
+      image_size: "1280x720",
+      negative_prompt: WAN_NEGATIVE_PROMPT,
+    }
+
+    const submitRes = await fetch("https://api.siliconflow.cn/v1/video/submit", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30000),
+    })
+
+    if (!submitRes.ok) {
+      throw new Error(`SiliconFlow video submit failed (${submitRes.status}): ${await submitRes.text()}`)
+    }
+
+    const submitData = await submitRes.json()
+    const requestId = submitData.requestId
+    if (!requestId) throw new Error("SiliconFlow returned no requestId")
+
+    // 轮询状态
+    const pollInterval = 5000
+    const maxAttempts = 60
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise(r => setTimeout(r, pollInterval))
+      const statusRes = await fetch("https://api.siliconflow.cn/v1/video/status", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ requestId }),
+        signal: AbortSignal.timeout(10000),
+      })
+
+      if (!statusRes.ok) continue
+      const statusData = await statusRes.json()
+
+      if (statusData.status === "Succeed" || statusData.status === "completed" || statusData.status === "success") {
+        const url = statusData.results?.videos?.[0]?.url
+          || statusData.video_url || statusData.videoUrl || statusData.url
+        if (url) return url
+        throw new Error(`SiliconFlow returned no video URL. Response: ${JSON.stringify(statusData).slice(0, 500)}`)
+      }
+      if (statusData.status === "Failed" || statusData.status === "failed") {
+        throw new Error("SiliconFlow video generation failed")
+      }
+    }
+    throw new Error("Video generation timed out")
+  }
+
+  // ===== MiniMax =====
+  const apiKey = process.env.MINIMAX_API_KEY
+  if (!apiKey) throw new Error("MINIMAX_API_KEY not set")
+
+  const body: Record<string, unknown> = {
+    model: "MiniMax-Hailuo-02",
+    prompt,
+    duration: options.duration || 6,
+    prompt_optimizer: true,
+  }
+
+  if (options.imageUrl) {
+    body.first_frame_image = options.imageUrl
+  }
+
+  // Step 1: 创建任务
+  const res = await fetch("https://api.minimaxi.com/v1/video_generation", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60000),
+  })
+
+  if (!res.ok) {
+    throw new Error(`MiniMax video create failed (${res.status}): ${await res.text()}`)
+  }
+
+  const createData = await res.json()
+  if (createData.base_resp?.status_code !== 0) {
+    throw new Error(`MiniMax video error: ${createData.base_resp?.status_msg || "unknown"} (code ${createData.base_resp?.status_code})`)
+  }
+
+  const taskId: string = createData.task_id
+  if (!taskId) throw new Error("MiniMax returned no task_id")
+
+  // Step 2: 轮询任务状态
+  const pollInterval = 5000
+  const maxAttempts = 60  // 5 min timeout
+  let fileId = ""
+
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise((r) => setTimeout(r, pollInterval))
+    const statusRes = await fetch(
+      `https://api.minimaxi.com/v1/query/video_generation?task_id=${taskId}`,
+      {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(10000),
+      }
+    )
+    if (!statusRes.ok) continue
+    const statusData = await statusRes.json()
+
+    if (statusData.status === "success") {
+      fileId = statusData.file_id
+      break
+    }
+    if (statusData.status === "failed") {
+      throw new Error(`MiniMax video generation failed`)
+    }
+  }
+
+  if (!fileId) throw new Error("Video generation timed out")
+
+  // Step 3: 获取下载链接
+  const fileRes = await fetch(
+    `https://api.minimaxi.com/v1/file/retrieve?file_id=${fileId}`,
+    {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(10000),
+    }
+  )
+
+  if (!fileRes.ok) {
+    throw new Error(`MiniMax file retrieve failed (${fileRes.status})`)
+  }
+
+  const fileData = await fileRes.json()
+  if (fileData.base_resp?.status_code !== 0) {
+    throw new Error(`MiniMax file error: ${fileData.base_resp?.status_msg || "unknown"}`)
+  }
+
+  const downloadUrl = fileData.file?.download_url
+  if (!downloadUrl) throw new Error("MiniMax returned no download URL")
+
+  return downloadUrl
 }
 
 /**

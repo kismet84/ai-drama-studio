@@ -11,18 +11,27 @@ export async function GET() {
       orderBy: { updatedAt: "desc" },
     })
 
-    const data = projects.map((p) => ({
-      id: p.id,
-      title: p.title,
-      description: p.description,
-      thumbnail: p.thumbnail,
-      status: p.status,
-      genre: p.genre,
-      scriptData: p.scriptData ? JSON.parse(p.scriptData) : null,
-      episodeCount: p._count.episodes,
-      createdAt: p.createdAt.toISOString(),
-      updatedAt: p.updatedAt.toISOString(),
-    }))
+    const data = projects.map((p) => {
+      const sd = p.scriptData ? JSON.parse(p.scriptData) : null
+      // 集数优先从剧本正文统计（scriptData.episodeScripts），其次 Prisma Episode 表
+      const scriptEps = sd?.episodeScripts
+        ? Object.values(sd.episodeScripts as Record<number, string>).filter(Boolean).length
+        : 0
+      const episodeCount = scriptEps || p._count.episodes
+
+      return {
+        id: p.id,
+        title: p.title,
+        description: p.description,
+        thumbnail: p.thumbnail,
+        status: p.status,
+        genre: p.genre,
+        scriptData: sd,
+        episodeCount,
+        createdAt: p.createdAt.toISOString(),
+        updatedAt: p.updatedAt.toISOString(),
+      }
+    })
 
     return NextResponse.json(data)
   } catch (error) {

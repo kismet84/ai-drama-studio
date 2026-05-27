@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react"
 import { useParams } from "next/navigation"
-import { Sparkles, Save, ArrowRight, ArrowLeft, Trash2, Plus, Loader2 } from "lucide-react"
+import { Sparkles, Save, ArrowRight, ArrowLeft, Trash2, Plus, Loader2, ChevronDown, ChevronRight, Lock } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Input } from "@/components/ui/input"
@@ -20,11 +20,15 @@ import {
   generateStoryOutline,
   generateEpisodeOutlines,
   generateSceneOutlines,
+  generateAdditionalScenes,
   generateScriptContent,
   generateReview,
   fixIssue,
   suggestTopicByIdea,
   searchTrendingTopics,
+  searchFacts,
+  deduplicateSuspense,
+  generateHooksForNewEpisodes,
 } from "./_actions"
 import type {
   ScriptWizardData,
@@ -34,6 +38,7 @@ import type {
   EpisodeOutline,
   SceneOutline,
   FixLogEntry,
+  FactItem,
 } from "@/types"
 import { TOPIC_OPTIONS } from "@/types"
 
@@ -42,9 +47,72 @@ const EMPTY_DATA: ScriptWizardData = {
   characters: [],
   suspenseList: [],
   episodeOutlines: [],
+  collapsedEpisodeGroups: [],
+  collapsedHookGroups: [],
+  collapsedMediumSuspense: false,
+  facts: [],
 }
 
 const REVIEW_CATEGORIES = ["逻辑", "人设", "节奏", "悬念", "合规"] as const
+
+/** 根据已写剧本同步锁定状态：钩子按序号对应集数，分集按 episodeNum 判断，角色按出场锁定 */
+function syncLockedStatus(data: ScriptWizardData): ScriptWizardData {
+  const scripts = data.episodeScripts || {}
+  const writtenEpNums = new Set(
+    Object.entries(scripts)
+      .filter(([, content]) => content?.trim())
+      .map(([num]) => parseInt(num))
+  )
+  // 分场大纲进度锁：场景到了第 N 集 → 前 N-1 集剧本视为已锁定
+  const sceneOutlines = data.episodeSceneOutlines || {}
+  const sceneMaxEp = Math.max(0, ...Object.keys(sceneOutlines).map(Number))
+  const sceneLockedEpNums = new Set<number>()
+  for (let i = 1; i < sceneMaxEp; i++) sceneLockedEpNums.add(i)
+  // 综合锁定集号：已写剧本 ∪ 场景进度锁
+  const allLockedEpNums = new Set([...writtenEpNums, ...sceneLockedEpNums])
+
+  let hookIdx = 0
+  const syncedSuspense = data.suspenseList.map(s => {
+    if (s.type === "hook") {
+      hookIdx++
+      return { ...s, locked: allLockedEpNums.has(hookIdx) }
+    }
+    return s
+  })
+  const syncedEpisodes = data.episodeOutlines.map(ep => ({
+    ...ep,
+    locked: allLockedEpNums.has(ep.episodeNum),
+  }))
+  const syncedSceneOutlines: Record<number, SceneOutline[]> = {}
+  for (const [epNum, scenes] of Object.entries(sceneOutlines)) {
+    const locked = allLockedEpNums.has(parseInt(epNum))
+    syncedSceneOutlines[parseInt(epNum)] = scenes.map(s => ({ ...s, locked }))
+  }
+
+  // 角色锁定：在任一锁定集的分场大纲 characters 数组中出场 → 锁定
+  const lockedCharNames = new Set<string>()
+  for (const epNum of allLockedEpNums) {
+    const scenes = sceneOutlines[epNum]
+    if (!scenes) continue
+    for (const scene of scenes) {
+      for (const name of scene.characters || []) {
+        if (name && name.length >= 2) lockedCharNames.add(name)
+      }
+    }
+  }
+  const syncedCharacters = data.characters.map(ch => ({
+    ...ch,
+    locked: lockedCharNames.has(ch.name),
+  }))
+
+  return {
+    ...data,
+    suspenseList: syncedSuspense,
+    episodeOutlines: syncedEpisodes,
+    episodeSceneOutlines: syncedSceneOutlines,
+    characters: syncedCharacters,
+  }
+}
 
 export default function ScriptWizardPage() {
   const params = useParams()
@@ -77,7 +145,7 @@ export default function ScriptWizardPage() {
 
   useEffect(() => {
     loadScriptData(projectId).then((loadedData) => {
-      if (loadedData) setData({ ...EMPTY_DATA, ...loadedData })
+      if (loadedData) setData(syncLockedStatus({ ...EMPTY_DATA, ...loadedData }))
       setLoaded(true)
     })
   }, [projectId])
@@ -88,7 +156,7 @@ export default function ScriptWizardPage() {
       saveTimer.current = setTimeout(() => {
         setSaving(true)
         saveScriptData(projectId, { ...newData }).finally(() => setSaving(false))
-      }, 2000)
+      }, 20000)
     },
     [projectId]
   )
@@ -96,7 +164,10 @@ export default function ScriptWizardPage() {
   const update = useCallback(
     (patch: Partial<ScriptWizardData>) => {
       setData((prev) => {
-        const next = { ...prev, ...patch }
+        let next = { ...prev, ...patch }
+        if ("episodeScripts" in patch || "episodeSceneOutlines" in patch) {
+          next = syncLockedStatus(next)
+        }
         autoSave(next)
         return next
       })
@@ -106,7 +177,7 @@ export default function ScriptWizardPage() {
 
   const goStep = useCallback((step: WizardStep) => update({ currentStep: step }), [update])
   const next = useCallback(() => {
-    const s = Math.min(data.currentStep + 1, 10) as WizardStep
+    const s = Math.min(data.currentStep + 1, 9) as WizardStep
     if (s !== data.currentStep) goStep(s)
   }, [data.currentStep, goStep])
   const prev = useCallback(() => {
@@ -176,15 +247,43 @@ export default function ScriptWizardPage() {
   const genSuspense = useCallback(() => {
     scheduleGenerate("suspense", async () => {
       const outlineStr = data.storyOutline ? JSON.stringify(data.storyOutline) : ""
-      const result = await generateSuspenseList(data.logline || "", outlineStr)
-      update({ suspenseList: result })
+      const charsStr = data.characters
+        .map((c) => `${c.name}(${c.role}): ${c.personality}, 秘密: ${c.secret}, 目的: ${c.goal}`)
+        .join("\n")
+      const result = await generateSuspenseList(data.logline || "", outlineStr, data.totalEpisodes || 12, charsStr)
+      // 保留已锁定的钩子/悬念，不被 AI 重新生成覆盖
+      const oldList = data.suspenseList
+      const oldHooks = oldList.filter(s => s.type === "hook")
+      let hookIdx = 0
+      const merged: SuspenseItem[] = []
+      for (const item of result) {
+        if (item.type === "hook") {
+          if (oldHooks[hookIdx]?.locked) {
+            merged.push(oldHooks[hookIdx])
+          } else {
+            merged.push(item)
+          }
+          hookIdx++
+        } else {
+          const lockedMatch = oldList.find(o => o.type === item.type && o.locked)
+          merged.push(lockedMatch || item)
+        }
+      }
+      // 追加不在结果中的已锁定项
+      for (const old of oldList) {
+        if (old.locked && !merged.some(m => m.id === old.id)) {
+          merged.push(old)
+        }
+      }
+      update({ suspenseList: merged })
     })
-  }, [scheduleGenerate, data.logline, data.storyOutline, update])
+  }, [scheduleGenerate, data.logline, data.storyOutline, data.totalEpisodes, data.suspenseList, update])
 
   const genOutline = useCallback(() => {
     scheduleGenerate("outline", async () => {
       const topicDisplay = TOPIC_OPTIONS.find((t) => t.id === data.topicId)?.title || data.topicTitle || ""
-      const result = await generateStoryOutline(topicDisplay, data.logline || "", data.worldBuilding || "")
+      const charsStr = data.characters.map((c) => `${c.name}(${c.role}): ${c.personality}, 秘密:${c.secret}`).join("\n")
+      const result = await generateStoryOutline(topicDisplay, data.logline || "", data.worldBuilding || "", charsStr)
       setAiResult(result)
       const qm = result.match(/起[：:][\s\S]*?】?\s*([\s\S]*?)(?=承|$)/) || result.match(/【起[：:][\s\S]*?】?\s*([\s\S]*?)(?=【承|$)/)
       const cm = result.match(/承[：:][\s\S]*?】?\s*([\s\S]*?)(?=转|$)/) || result.match(/【承[：:][\s\S]*?】?\s*([\s\S]*?)(?=【转|$)/)
@@ -204,23 +303,66 @@ export default function ScriptWizardPage() {
   const genEps = useCallback(() => {
     scheduleGenerate("eps", async () => {
       const outlineStr = data.storyOutline ? JSON.stringify(data.storyOutline) : ""
-      const result = await generateEpisodeOutlines(
-        data.logline || "",
-        outlineStr,
-        data.totalEpisodes || 60
-      )
-      update({ episodeOutlines: result, totalEpisodes: data.totalEpisodes || 60 })
+      const hookCount = data.suspenseList.filter(s => s.type === "hook").length
+      const epCount = data.totalEpisodes || hookCount || 12
+      const BATCH = 30
+      const charsStr = data.characters.map((c) => `${c.name}(${c.role}): ${c.personality}, 秘密:${c.secret}`).join("\n")
+
+      const scripts = data.episodeScripts || {}
+      const oldOutlines = data.episodeOutlines || []
+      const lockedEpNums = new Set(Object.keys(scripts).map(Number).filter(n => scripts[n]?.trim()))
+
+      // 分批生成，每批30集，顺延不超总集数
+      let allGenerated: EpisodeOutline[] = []
+      for (let start = 1; start <= epCount; start += BATCH) {
+        const batchSize = Math.min(BATCH, epCount - start + 1)
+        const batch = await generateEpisodeOutlines(
+          data.logline || "",
+          outlineStr,
+          start,
+          batchSize,
+          epCount,
+          charsStr
+        )
+        allGenerated = allGenerated.concat(batch)
+        // 每批完成后更新 UI，让用户看到进度
+        const progress = [...allGenerated]
+        oldOutlines.forEach(ep => {
+          if (lockedEpNums.has(ep.episodeNum) && !progress.some(p => p.episodeNum === ep.episodeNum)) {
+            progress.push(ep)
+          }
+        })
+        update({ episodeOutlines: progress.sort((a, b) => a.episodeNum - b.episodeNum) })
+      }
+
+      // 最终合并：锁定的集保留旧大纲，其余用新生成的结果
+      const newEpNums = new Set(allGenerated.map(e => e.episodeNum))
+      const merged = allGenerated.map(ep => {
+        if (lockedEpNums.has(ep.episodeNum)) {
+          const old = oldOutlines.find(o => o.episodeNum === ep.episodeNum)
+          return old || ep
+        }
+        return ep
+      })
+      oldOutlines.forEach(ep => {
+        if (lockedEpNums.has(ep.episodeNum) && !newEpNums.has(ep.episodeNum)) {
+          merged.push(ep)
+        }
+      })
+
+      update({ episodeOutlines: merged.sort((a, b) => a.episodeNum - b.episodeNum), totalEpisodes: epCount })
     })
-  }, [scheduleGenerate, data.logline, data.storyOutline, data.totalEpisodes, update])
+  }, [scheduleGenerate, data.logline, data.storyOutline, data.totalEpisodes, data.suspenseList, data.episodeScripts, data.episodeOutlines, update])
 
   const genScenes = useCallback(
     (epNum: number) => {
       scheduleGenerate(`scenes-${epNum}`, async () => {
         const ep = data.episodeOutlines.find((e) => e.episodeNum === epNum)
         const epStr = ep ? `标题: ${ep.title}\n概要: ${ep.summary}\n冲突: ${ep.conflict}` : ""
-        const dur = data.episodeDurationSeconds ?? 300
+        const dur = Math.max(240, Math.min(300, data.episodeDurationSeconds ?? 270))
         const aiGen = data.aiGenerationDuration ?? 10
-        const result = await generateSceneOutlines(epStr, epNum, dur, aiGen)
+        const charsStr = data.characters.map((c) => `${c.name}(${c.role})`).join(",")
+        const result = await generateSceneOutlines(epStr, epNum, dur, aiGen, charsStr)
         const current = data.episodeSceneOutlines || {}
         update({
           episodeSceneOutlines: { ...current, [epNum]: result },
@@ -282,6 +424,16 @@ export default function ScriptWizardPage() {
     },
     [data.reviewNotes, update]
   )
+
+  const handleSearchFacts = useCallback(() => {
+    const outlineSummary = data.storyOutline
+      ? `起：${data.storyOutline.qi}\n承：${data.storyOutline.cheng}\n转：${data.storyOutline.zhuan}\n合：${data.storyOutline.he}`
+      : ""
+    scheduleGenerate("facts", async () => {
+      const results = await searchFacts(data.topicTitle || "", data.logline || "", outlineSummary)
+      if (results.length > 0) update({ facts: results })
+    })
+  }, [scheduleGenerate, data.topicTitle, data.logline, data.storyOutline])
 
   const handleFix = useCallback(
     async (category: string) => {
@@ -419,6 +571,8 @@ export default function ScriptWizardPage() {
 
   const delChar = useCallback(
     (id: string) => {
+      const ch = data.characters.find((c) => c.id === id)
+      if (ch?.locked) return
       update({ characters: data.characters.filter((c) => c.id !== id) })
     },
     [data.characters, update]
@@ -451,20 +605,35 @@ export default function ScriptWizardPage() {
     [data.suspenseList, update]
   )
 
-  const addEp = useCallback(() => {
+  const addEpsFive = useCallback(async () => {
+    if (generating) return
     const maxNum = data.episodeOutlines.length > 0
       ? Math.max(...data.episodeOutlines.map((e) => e.episodeNum))
       : 0
-    const ep: EpisodeOutline = {
-      episodeNum: maxNum + 1,
-      title: `第${maxNum + 1}集`,
-      summary: "",
-      conflict: "",
-      hook: "",
-      keyScenes: [],
+    const startEp = maxNum + 1
+    const outlineStr = data.storyOutline ? JSON.stringify(data.storyOutline) : ""
+    const newTotal = Math.max(data.totalEpisodes || 0, startEp + 4)
+    const charsStr = data.characters.map((c) => `${c.name}(${c.role}): ${c.personality}`).join("\n")
+    setGenerating("addEps")
+    try {
+      const batch = await generateEpisodeOutlines(
+        data.logline || "",
+        outlineStr,
+        startEp,
+        5,
+        newTotal,
+        charsStr
+      )
+      if (batch.length > 0) {
+        update({
+          episodeOutlines: [...data.episodeOutlines, ...batch],
+          totalEpisodes: newTotal,
+        })
+      }
+    } finally {
+      setGenerating(null)
     }
-    update({ episodeOutlines: [...data.episodeOutlines, ep] })
-  }, [data.episodeOutlines, update])
+  }, [generating, data.episodeOutlines, data.storyOutline, data.totalEpisodes, data.logline, update])
 
   const updEp = useCallback(
     (epNum: number, patch: Partial<EpisodeOutline>) => {
@@ -482,22 +651,31 @@ export default function ScriptWizardPage() {
     [data.episodeOutlines, update]
   )
 
-  const addSc = useCallback(
-    (epNum: number) => {
-      const current = data.episodeSceneOutlines || {}
-      const scenes = current[epNum] || []
-      const sc: SceneOutline = {
-        sceneNum: scenes.length + 1,
-        location: "",
-        characters: [],
-        summary: "",
-        purpose: "",
-        durationSeconds: data.aiGenerationDuration ?? 10,
+  const addScenesFive = useCallback(async () => {
+    if (generating) return
+    const epNum = data.activeSceneEpisode || 1
+    const current = data.episodeSceneOutlines || {}
+    const existingScenes = current[epNum] || []
+    const nextNum = existingScenes.length > 0
+      ? Math.max(...existingScenes.map(s => s.sceneNum)) + 1
+      : 1
+
+    const ep = data.episodeOutlines.find(e => e.episodeNum === epNum)
+    const epStr = ep ? `标题: ${ep.title}\n概要: ${ep.summary}\n冲突: ${ep.conflict}` : ""
+    const existingStr = existingScenes.map(s => `场景${s.sceneNum}: ${s.location} | ${s.characters.join(",")} | ${s.summary}`).join("\n")
+    const aiGen = data.aiGenerationDuration ?? 10
+    const charsStr = data.characters.map((c) => `${c.name}(${c.role})`).join(",")
+
+    setGenerating("addScenes")
+    try {
+      const batch = await generateAdditionalScenes(epStr, existingStr, epNum, nextNum, 5, aiGen, charsStr)
+      if (batch.length > 0) {
+        update({ episodeSceneOutlines: { ...current, [epNum]: [...existingScenes, ...batch] } })
       }
-      update({ episodeSceneOutlines: { ...current, [epNum]: [...scenes, sc] } })
-    },
-    [data.episodeSceneOutlines, update]
-  )
+    } finally {
+      setGenerating(null)
+    }
+  }, [generating, data.activeSceneEpisode, data.episodeSceneOutlines, data.episodeOutlines, data.aiGenerationDuration, update])
 
   const updSc = useCallback(
     (epNum: number, sceneIdx: number, patch: Partial<SceneOutline>) => {
@@ -539,6 +717,13 @@ export default function ScriptWizardPage() {
   const episodeScripts = data.episodeScripts || {}
   const episodeScenes = data.episodeSceneOutlines || {}
 
+  // 分场大纲进度锁：场景大纲到了第 N 集 → 锁定前 N-1 集的剧本正文
+  const sceneMaxEp = Math.max(0, ...Object.keys(episodeScenes).map(Number))
+  const scriptLockedEpNums = new Set<number>()
+  for (let i = 1; i < sceneMaxEp; i++) {
+    scriptLockedEpNums.add(i)
+  }
+
   const completedSteps: Set<number> = (() => {
     const s = new Set<number>()
     if (data.topicId || data.topicTitle) s.add(1)
@@ -548,9 +733,8 @@ export default function ScriptWizardPage() {
     if (data.suspenseList.length > 0) s.add(5)
     if (data.storyOutline) s.add(6)
     if (data.episodeOutlines.length > 0) s.add(7)
-    if (data.reviewNotes) s.add(8)
-    if (data.episodeSceneOutlines && Object.keys(data.episodeSceneOutlines).length > 0) s.add(9)
-    if (data.episodeScripts && Object.keys(data.episodeScripts).length > 0) s.add(10)
+    if (data.episodeSceneOutlines && Object.keys(data.episodeSceneOutlines).length > 0) s.add(8)
+    if (data.episodeScripts && Object.keys(data.episodeScripts).length > 0) s.add(9)
     return s
   })()
 
@@ -569,9 +753,9 @@ export default function ScriptWizardPage() {
       <aside className="w-52 border-r border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 flex flex-col shrink-0">
         <div className="px-4 py-3 border-b border-zinc-200 dark:border-zinc-800">
           <h2 className="text-sm font-semibold">创作步骤</h2>
-          <p className="text-xs text-zinc-500 mt-0.5">完成 {completedSteps.size}/10 步</p>
+          <p className="text-xs text-zinc-500 mt-0.5">完成 {completedSteps.size}/9 步</p>
           <div className="mt-2 h-1.5 rounded-full bg-zinc-100 dark:bg-zinc-800 overflow-hidden">
-            <div className="h-full rounded-full bg-indigo-500 transition-all" style={{ width: `${(completedSteps.size / 10) * 100}%` }} />
+            <div className="h-full rounded-full bg-indigo-500 transition-all" style={{ width: `${(completedSteps.size / 9) * 100}%` }} />
           </div>
         </div>
         <div className="flex-1 overflow-y-auto px-2 py-2">
@@ -587,8 +771,8 @@ export default function ScriptWizardPage() {
         <div className="max-w-3xl mx-auto space-y-6">
           <div className="flex items-center justify-between">
             <Button variant="ghost" onClick={prev} disabled={step === 1}><ArrowLeft className="h-4 w-4" /> 上一步</Button>
-            <span className="text-sm text-zinc-500">第 {step} 步 / 共 10 步</span>
-            <Button variant="ghost" onClick={next} disabled={step === 10}>下一步 <ArrowRight className="h-4 w-4" /></Button>
+            <span className="text-sm text-zinc-500">第 {step} 步 / 共 9 步</span>
+            <Button variant="ghost" onClick={next} disabled={step === 9}>下一步 <ArrowRight className="h-4 w-4" /></Button>
           </div>
           {step === 1 && <div className="space-y-4">
             <div><h3 className="text-lg font-bold">Step 1: 选题定赛道</h3><p className="text-sm text-zinc-500 mt-1">选已被市场验证过的方向，或用 AI 帮你出主意。</p></div>
@@ -627,103 +811,99 @@ export default function ScriptWizardPage() {
           </div>}
           {step === 4 && <div className="space-y-4"><div><h3 className="text-lg font-bold">Step 4: 人物属性卡</h3><p className="text-sm text-zinc-500 mt-1">每个角色6要素：身份、性格、隐藏秘密、核心目的、弱点、标志性动作。建议4-6个。</p></div>
             <div className="flex gap-2"><Button variant="outline" onClick={genChars} disabled={!!generating} className="gap-2">{generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}AI 生成角色</Button><Button variant="outline" onClick={addChar} className="gap-1.5"><Plus className="h-4 w-4" /> 手动添加</Button></div>
-            <div className="space-y-3">{data.characters.map((c) => <Card key={c.id}><CardHeader className="pb-2"><div className="flex items-center justify-between"><CardTitle className="text-sm">{c.name || "未命名"}</CardTitle><Button variant="ghost" size="icon" onClick={() => delChar(c.id)}><Trash2 className="h-3.5 w-3.5 text-red-500" /></Button></div></CardHeader>
+            <div className="space-y-3">{data.characters.map((c) => <Card key={c.id} className={cn(c.locked && "opacity-70")}><CardHeader className="pb-2"><div className="flex items-center justify-between"><CardTitle className="text-sm flex items-center gap-1.5">{c.locked && <Lock className="h-3.5 w-3.5 text-amber-500 shrink-0" />}{c.name || "未命名"}</CardTitle><Button variant="ghost" size="icon" onClick={() => delChar(c.id)} disabled={c.locked}>{c.locked ? <Lock className="h-3.5 w-3.5 text-zinc-400" /> : <Trash2 className="h-3.5 w-3.5 text-red-500" />}</Button></div></CardHeader>
               <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <div><label className="text-xs text-zinc-500">名字</label><Input value={c.name} onChange={(e) => updChar(c.id, { name: e.target.value })} className="h-8 text-sm" /></div>
-                <div><label className="text-xs text-zinc-500">定位</label><select value={c.role} onChange={(e) => updChar(c.id, { role: e.target.value })} className="w-full h-8 text-sm rounded-md border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-2"><option>主角</option><option>反派</option><option>配角</option></select></div>
-                <div><label className="text-xs text-zinc-500">身份</label><Input value={c.identity} onChange={(e) => updChar(c.id, { identity: e.target.value })} className="h-8 text-sm" placeholder="他是谁" /></div>
-                <div><label className="text-xs text-zinc-500">性格</label><Input value={c.personality} onChange={(e) => updChar(c.id, { personality: e.target.value })} className="h-8 text-sm" /></div>
-                <div className="sm:col-span-2"><label className="text-xs text-zinc-500">隐藏秘密</label><Input value={c.secret} onChange={(e) => updChar(c.id, { secret: e.target.value })} className="h-8 text-sm" placeholder="悬疑核心" /></div>
-                <div><label className="text-xs text-zinc-500">核心目的</label><Input value={c.goal} onChange={(e) => updChar(c.id, { goal: e.target.value })} className="h-8 text-sm" /></div>
-                <div><label className="text-xs text-zinc-500">弱点</label><Input value={c.weakness} onChange={(e) => updChar(c.id, { weakness: e.target.value })} className="h-8 text-sm" /></div>
-                <div className="sm:col-span-2"><label className="text-xs text-zinc-500">标志性动作/台词</label><Input value={c.signature} onChange={(e) => updChar(c.id, { signature: e.target.value })} className="h-8 text-sm" /></div></CardContent></Card>)}</div>
+                <div><label className="text-xs text-zinc-500">名字</label><Input value={c.name} onChange={(e) => updChar(c.id, { name: e.target.value })} disabled={c.locked} className="h-8 text-sm" /></div>
+                <div><label className="text-xs text-zinc-500">定位</label><select value={c.role} onChange={(e) => updChar(c.id, { role: e.target.value })} disabled={c.locked} className="w-full h-8 text-sm rounded-md border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-2 disabled:opacity-50"><option>主角</option><option>反派</option><option>配角</option></select></div>
+                <div><label className="text-xs text-zinc-500">身份</label><Input value={c.identity} onChange={(e) => updChar(c.id, { identity: e.target.value })} disabled={c.locked} className="h-8 text-sm" placeholder={c.locked ? "已锁定" : "他是谁"} /></div>
+                <div><label className="text-xs text-zinc-500">性格</label><Input value={c.personality} onChange={(e) => updChar(c.id, { personality: e.target.value })} disabled={c.locked} className="h-8 text-sm" /></div>
+                <div className="sm:col-span-2"><label className="text-xs text-zinc-500">隐藏秘密</label><Input value={c.secret} onChange={(e) => updChar(c.id, { secret: e.target.value })} disabled={c.locked} className="h-8 text-sm" placeholder={c.locked ? "已锁定" : "悬疑核心"} /></div>
+                <div><label className="text-xs text-zinc-500">核心目的</label><Input value={c.goal} onChange={(e) => updChar(c.id, { goal: e.target.value })} disabled={c.locked} className="h-8 text-sm" /></div>
+                <div><label className="text-xs text-zinc-500">弱点</label><Input value={c.weakness} onChange={(e) => updChar(c.id, { weakness: e.target.value })} disabled={c.locked} className="h-8 text-sm" /></div>
+                <div className="sm:col-span-2"><label className="text-xs text-zinc-500">标志性动作/台词</label><Input value={c.signature} onChange={(e) => updChar(c.id, { signature: e.target.value })} disabled={c.locked} className="h-8 text-sm" /></div></CardContent></Card>)}</div>
             {data.characters.length >= 4 && <div className="flex justify-end"><Button variant="primary" onClick={next}>保存并继续 <ArrowRight className="h-4 w-4" /></Button></div>}
           </div>}
-          {step === 5 && <div className="space-y-4"><div><h3 className="text-lg font-bold">Step 5: 悬念 + 伏笔清单</h3><p className="text-sm text-zinc-500 mt-1">大悬念（1个全剧）、中层悬念（3-4个）、小钩子（每集结尾）。</p></div>
-            <div className="flex gap-2 flex-wrap"><Button variant="outline" onClick={genSuspense} disabled={!!generating} className="gap-2">{generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}AI 生成悬念</Button><Button variant="outline" size="sm" onClick={() => addSusp()}>+ 添加悬念</Button></div>
+          {step === 5 && <div className="space-y-4"><div><h3 className="text-lg font-bold">Step 5: 悬念 + 伏笔清单</h3><p className="text-sm text-zinc-500 mt-1">大悬念（1个全剧）、中层悬念（3-4个）、小钩子（每集结尾）。先设定预计集数再规划悬念。</p></div>
+            <div className="flex gap-2 flex-wrap"><Button variant="outline" onClick={genSuspense} disabled={!!generating} className="gap-2">{generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}AI 生成悬念</Button><Button variant="outline" size="sm" onClick={async () => { const ep = data.totalEpisodes || 0; const suspCtx = data.suspenseList.map(s => `[${s.type}] ${s.description}${s.revealEpisode ? ` (第${s.revealEpisode}集揭晓)` : ""}`).join("\n"); const charsStr = data.characters.map(c => `${c.name}(${c.role}): ${c.personality}, 秘密:${c.secret}`).join("\n"); const hooks = await generateHooksForNewEpisodes(data.logline || "", suspCtx, ep + 1, 5, charsStr); if (hooks.length) update({ suspenseList: [...data.suspenseList, ...hooks], totalEpisodes: ep + 5 }) }} className="gap-1"><Plus className="h-3 w-3" />+5集</Button><div className="flex items-center gap-1.5 ml-auto"><span className="text-xs text-zinc-500">预计集数:</span><Input type="number" value={data.totalEpisodes || 12} onChange={(e) => update({ totalEpisodes: parseInt(e.target.value) || 12 })} className="h-8 w-16 text-sm" /><Button variant="outline" size="sm" className="ml-1 text-xs" onClick={() => { const hooks = data.suspenseList.filter(s => s.type === "hook").length; if (hooks > (data.totalEpisodes || 0)) update({ totalEpisodes: hooks }) }}>同步({data.suspenseList.filter(s => s.type === "hook").length})</Button></div></div>
             <div className="space-y-2">{(["major", "medium", "hook"] as const).map((t) => { const items = data.suspenseList.filter((s) => s.type === t); if (!items.length) return null; const ls: Record<string, string> = { major: "大悬念", medium: "中层悬念", hook: "小钩子" }; const cs: Record<string, string> = { major: "bg-red-100 text-red-700", medium: "bg-amber-100 text-amber-700", hook: "bg-blue-100 text-blue-700" }
-              return <div key={t}><h4 className="text-sm font-semibold mb-2">{ls[t]}</h4>{items.map((item) => <Card key={item.id} className="mb-2"><CardContent className="pt-3 pb-3 flex gap-2 items-start"><Badge className={cn("text-xs shrink-0", cs[t])}>{ls[t]}</Badge><Input value={item.description} onChange={(e) => updSusp(item.id, { description: e.target.value })} placeholder="悬念描述..." className="h-8 text-sm flex-1" />{t !== "hook" && <Input type="number" value={item.revealEpisode || ""} onChange={(e) => updSusp(item.id, { revealEpisode: parseInt(e.target.value) || undefined })} placeholder="揭晓集" className="h-8 text-sm w-20" />}<Button variant="ghost" size="icon" onClick={() => delSusp(item.id)}><Trash2 className="h-3.5 w-3.5 text-red-500" /></Button></CardContent></Card>)}</div> })}</div>
+              if (t === "hook") { const groupSize = 10; const groups: SuspenseItem[][] = []; for (let i = 0; i < items.length; i += groupSize) groups.push(items.slice(i, i + groupSize)); const savedHook = data.collapsedHookGroups; const hasSavedHook = savedHook && savedHook.length > 0
+                return <div key={t}><h4 className="text-sm font-semibold mb-2">{ls[t]}（{items.length}个，每10集一组折叠）</h4>{groups.map((group, gi) => { const startEp = gi * groupSize + 1; const endEp = Math.min((gi + 1) * groupSize, items.length); const collapsed = hasSavedHook ? savedHook!.includes(gi) : gi > 0; const toggle = () => { const s = new Set(hasSavedHook ? savedHook! : []); if (collapsed) s.delete(gi); else s.add(gi); update({ collapsedHookGroups: Array.from(s) }) }
+                  return <div key={gi} className="mb-1"><button type="button" className="flex items-center gap-1.5 text-xs font-medium text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 mb-1.5 transition-colors" onClick={toggle}>{collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}第 {startEp}-{endEp} 集钩子（{group.length}个）</button>{!collapsed && group.map((item, itemIdx) => <Card key={item.id} className={cn("mb-2", item.locked && "opacity-70")}><CardContent className="pt-3 pb-3 flex gap-2 items-start"><Badge className={cn("text-xs shrink-0", cs[t])}>第{startEp + itemIdx}集</Badge>{item.locked && <Lock className="h-3 w-3 text-amber-500 shrink-0" />}<Input value={item.description} onChange={(e) => updSusp(item.id, { description: e.target.value })} placeholder={item.locked ? "已锁定" : "悬念描述..."} disabled={item.locked} className="h-8 text-sm flex-1" /><Button variant="ghost" size="icon" onClick={() => delSusp(item.id)} disabled={item.locked}>{item.locked ? <Lock className="h-3.5 w-3.5 text-zinc-400" /> : <Trash2 className="h-3.5 w-3.5 text-red-500" />}</Button></CardContent></Card>)}</div> })}
+              </div> }
+              if (t === "medium") { const collapsed = !!data.collapsedMediumSuspense
+                return <div key={t}><button type="button" className="flex items-center gap-1.5 text-sm font-semibold mb-2 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors" onClick={() => update({ collapsedMediumSuspense: !collapsed })}>{collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}{ls[t]}（{items.length}个）</button>{!collapsed && items.map((item) => <Card key={item.id} className={cn("mb-2", item.locked && "opacity-70")}><CardContent className="pt-3 pb-3 flex gap-2 items-start"><Badge className={cn("text-xs shrink-0", cs[t])}>{ls[t]}</Badge>{item.locked && <Lock className="h-3 w-3 text-amber-500 shrink-0" />}<Input value={item.description} onChange={(e) => updSusp(item.id, { description: e.target.value })} placeholder={item.locked ? "已锁定" : "悬念描述..."} disabled={item.locked} className="h-8 text-sm flex-1" /><Input type="number" value={item.revealEpisode || ""} onChange={(e) => updSusp(item.id, { revealEpisode: parseInt(e.target.value) || undefined })} placeholder="揭晓集(Step7后回填)" disabled={item.locked} className="h-8 text-sm w-20" /><Button variant="ghost" size="icon" onClick={() => delSusp(item.id)} disabled={item.locked}>{item.locked ? <Lock className="h-3.5 w-3.5 text-zinc-400" /> : <Trash2 className="h-3.5 w-3.5 text-red-500" />}</Button></CardContent></Card>)}</div> }
+              return <div key={t}><h4 className="text-sm font-semibold mb-2">{ls[t]}</h4>{items.map((item) => <Card key={item.id} className={cn("mb-2", item.locked && "opacity-70")}><CardContent className="pt-3 pb-3 flex gap-2 items-start"><Badge className={cn("text-xs shrink-0", cs[t])}>{ls[t]}</Badge>{item.locked && <Lock className="h-3 w-3 text-amber-500 shrink-0" />}<Input value={item.description} onChange={(e) => updSusp(item.id, { description: e.target.value })} placeholder={item.locked ? "已锁定" : "悬念描述..."} disabled={item.locked} className="h-8 text-sm flex-1" /><Input type="number" value={item.revealEpisode || ""} onChange={(e) => updSusp(item.id, { revealEpisode: parseInt(e.target.value) || undefined })} placeholder="揭晓集(Step7后回填)" disabled={item.locked} className="h-8 text-sm w-20" /><Button variant="ghost" size="icon" onClick={() => delSusp(item.id)} disabled={item.locked}>{item.locked ? <Lock className="h-3.5 w-3.5 text-zinc-400" /> : <Trash2 className="h-3.5 w-3.5 text-red-500" />}</Button></CardContent></Card>)}</div> })}</div>
             {data.suspenseList.length > 0 && <div className="flex justify-end"><Button variant="primary" onClick={next}>保存并继续 <ArrowRight className="h-4 w-4" /></Button></div>}
           </div>}
           {step === 6 && <div className="space-y-4"><div><h3 className="text-lg font-bold">Step 6: 整体大纲（起承转合）</h3><p className="text-sm text-zinc-500 mt-1">起（跌落谷底）→ 承（发现疑点）→ 转（逐层反击）→ 合（真相大白+逆袭）</p></div>
             <Button variant="outline" onClick={genOutline} disabled={!!generating} className="gap-2">{generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}AI 生成大纲</Button>
             {[{ k: "qi" as const, l: "起：跌落谷底", h: "主角如何被陷害，跌入人生最低谷" }, { k: "cheng" as const, l: "承：发现疑点", h: "偶然发现当年的不对劲，决定调查" }, { k: "zhuan" as const, l: "转：逐层反击", h: "隐藏身份步步调查，拆穿小阴谋" }, { k: "he" as const, l: "合：真相大白+逆袭", h: "找到终极黑手，拿出证据，重返巅峰" }].map(({ k, l, h }) => <Card key={k}><CardHeader className="pb-2"><CardTitle className="text-sm">{l}</CardTitle></CardHeader><CardContent><Textarea placeholder={h} value={data.storyOutline?.[k] || ""} onChange={(e) => update({ storyOutline: { ...data.storyOutline, [k]: e.target.value, qi: data.storyOutline?.qi || "", cheng: data.storyOutline?.cheng || "", zhuan: data.storyOutline?.zhuan || "", he: data.storyOutline?.he || "" } })} rows={4} /></CardContent></Card>)}
+            {/* 参考事实 */}
+            <Card className="border-dashed"><CardHeader className="pb-2"><div className="flex items-center justify-between"><CardTitle className="text-sm">📚 参考事实</CardTitle><Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={handleSearchFacts} disabled={!!generating || !data.topicTitle}>{generating ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}搜索相关事件</Button></div><p className="text-xs text-zinc-500">AI 检索真实发生过的事件/案例，为剧情提供参考素材</p></CardHeader>
+              {(data.facts || []).length > 0 && <CardContent><div className="space-y-2">{(data.facts || []).map((f, i) => <div key={i} className="p-2 rounded-lg bg-zinc-50 dark:bg-zinc-800/50"><div className="flex items-center gap-2 mb-1"><span className="text-xs font-medium">{f.title}</span><Badge className="text-[10px] bg-indigo-50 text-indigo-600 dark:bg-indigo-900/30">{f.relevance}</Badge></div><p className="text-xs text-zinc-600 dark:text-zinc-400">{f.detail}</p></div>)}</div></CardContent>}
+            </Card>
             {data.storyOutline?.qi && <div className="flex justify-end"><Button variant="primary" onClick={next}>保存并继续 <ArrowRight className="h-4 w-4" /></Button></div>}
           </div>}
           {step === 7 && <div className="space-y-4"><div><h3 className="text-lg font-bold">Step 7: 分集大纲</h3><p className="text-sm text-zinc-500 mt-1">每集：标题、概要、核心冲突、结尾钩子。</p></div>
-            <div className="flex gap-2 items-center"><Button variant="outline" onClick={genEps} disabled={!!generating} className="gap-2">{generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}AI 生成分集</Button><Button variant="outline" size="sm" onClick={addEp}><Plus className="h-3.5 w-3.5" /> 添加</Button><div className="flex items-center gap-1.5 ml-auto"><span className="text-xs text-zinc-500">总集数:</span><Input type="number" value={data.totalEpisodes || 12} onChange={(e) => update({ totalEpisodes: parseInt(e.target.value) || 12 })} className="h-8 w-16 text-sm" /></div></div>
-            <div className="space-y-2">{data.episodeOutlines.map((ep) => <Card key={ep.episodeNum}><CardHeader className="pb-2"><div className="flex items-center justify-between"><CardTitle className="text-sm">第{ep.episodeNum}集：{ep.title}</CardTitle><Button variant="ghost" size="icon" onClick={() => delEp(ep.episodeNum)}><Trash2 className="h-3.5 w-3.5 text-red-500" /></Button></div></CardHeader><CardContent className="space-y-2"><Input value={ep.title} onChange={(e) => updEp(ep.episodeNum, { title: e.target.value })} placeholder="标题" className="h-8 text-sm" /><Textarea value={ep.summary} onChange={(e) => updEp(ep.episodeNum, { summary: e.target.value })} placeholder="本集概要" rows={2} className="text-sm" /><Input value={ep.conflict} onChange={(e) => updEp(ep.episodeNum, { conflict: e.target.value })} placeholder="核心冲突" className="h-8 text-sm" /><Input value={ep.hook} onChange={(e) => updEp(ep.episodeNum, { hook: e.target.value })} placeholder="结尾钩子" className="h-8 text-sm" /></CardContent></Card>)}</div>
-            {data.episodeOutlines.length > 0 && <div className="flex justify-end"><Button variant="primary" onClick={next}>保存并进入复盘 <ArrowRight className="h-4 w-4" /></Button></div>}
+            <div className="flex gap-2 items-center"><Button variant="outline" onClick={genEps} disabled={!!generating} className="gap-2">{generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}AI 生成分集</Button><Button variant="outline" size="sm" onClick={addEpsFive} disabled={!!generating} className="gap-1">{generating === "addEps" ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}+5集</Button><div className="flex items-center gap-1.5 ml-auto"><span className="text-xs text-zinc-500">总集数:</span><Input type="number" value={data.totalEpisodes || 12} onChange={(e) => update({ totalEpisodes: parseInt(e.target.value) || 12 })} className="h-8 w-16 text-sm" /></div></div>
+            <div className="space-y-2">{(() => { const GROUP = 10; const groups: EpisodeOutline[][] = []; for (let i = 0; i < data.episodeOutlines.length; i += GROUP) groups.push(data.episodeOutlines.slice(i, i + GROUP)); const saved = data.collapsedEpisodeGroups; const hasSaved = saved && saved.length > 0; return groups.map((group, gi) => { const start = gi * GROUP + 1; const end = Math.min((gi + 1) * GROUP, data.episodeOutlines.length); const collapsed = hasSaved ? saved!.includes(gi) : gi > 0; const toggle = () => { const s = new Set(hasSaved ? saved! : []); if (collapsed) s.delete(gi); else s.add(gi); update({ collapsedEpisodeGroups: Array.from(s) }) }; return <div key={gi} className="mb-3"><button type="button" className="flex items-center gap-1.5 text-xs font-medium text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 mb-2 transition-colors w-full text-left" onClick={toggle}>{collapsed ? <ChevronRight className="h-3 w-3 shrink-0" /> : <ChevronDown className="h-3 w-3 shrink-0" />}第 {start}-{end} 集（{group.length}集）</button>{!collapsed && <div className="space-y-2">{group.map((ep) => <Card key={ep.episodeNum} className={cn(ep.locked && "opacity-70")}><CardHeader className="pb-2"><div className="flex items-center justify-between"><CardTitle className="text-sm">第{ep.episodeNum}集：{ep.title}{ep.locked ? " 🔒" : ""}</CardTitle><Button variant="ghost" size="icon" onClick={() => delEp(ep.episodeNum)} disabled={ep.locked}>{ep.locked ? <Lock className="h-3.5 w-3.5 text-zinc-400" /> : <Trash2 className="h-3.5 w-3.5 text-red-500" />}</Button></div></CardHeader><CardContent className="space-y-2"><Input value={ep.title} onChange={(e) => updEp(ep.episodeNum, { title: e.target.value })} placeholder={ep.locked ? "已锁定" : "标题"} disabled={ep.locked} className="h-8 text-sm" /><Textarea value={ep.summary} onChange={(e) => updEp(ep.episodeNum, { summary: e.target.value })} placeholder={ep.locked ? "已锁定" : "本集概要"} disabled={ep.locked} rows={2} className="text-sm" /><Input value={ep.conflict} onChange={(e) => updEp(ep.episodeNum, { conflict: e.target.value })} placeholder={ep.locked ? "已锁定" : "核心冲突"} disabled={ep.locked} className="h-8 text-sm" /><Input value={ep.hook} onChange={(e) => updEp(ep.episodeNum, { hook: e.target.value })} placeholder={ep.locked ? "已锁定" : "结尾钩子"} disabled={ep.locked} className="h-8 text-sm" /></CardContent></Card>)}</div>}</div> }) })()}</div>
+            {data.episodeOutlines.length > 0 && <div className="flex justify-end"><Button variant="primary" onClick={next}>保存并继续 <ArrowRight className="h-4 w-4" /></Button></div>}
           </div>}
-          {step === 8 && <div className="space-y-4"><div><h3 className="text-lg font-bold">Step 8: 复盘 + 过审自查</h3><p className="text-sm text-zinc-500 mt-1">审查分集大纲（Step 3-7），通过后进入分场撰写。</p></div>
-            <Button variant="outline" onClick={genReview} disabled={!!generating || !data.episodeOutlines.length} className="gap-2">{generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}AI 复盘检查</Button>
-            <details className="group"><summary className="text-sm font-medium text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 cursor-pointer select-none py-1">审查规范（可自定义）</summary>
-              <div className="mt-2 space-y-2 pl-2 border-l-2 border-zinc-200 dark:border-zinc-700">
-                {([{ key: "logic" as const, label: "逻辑检查", color: "border-l-blue-400" }, { key: "character" as const, label: "人设检查", color: "border-l-emerald-400" }, { key: "pacing" as const, label: "节奏检查", color: "border-l-amber-400" }, { key: "suspense" as const, label: "悬念检查", color: "border-l-purple-400" }, { key: "compliance" as const, label: "合规检查", color: "border-l-red-400" }]).map(({ key, label, color }) => {
-                  const spec = data.reviewSpec || { logic: [], character: [], pacing: [], suspense: [], compliance: [] }
-                  const items: string[] = spec[key] || []
-                  return <div key={key} className={cn("pl-2 border-l-2", color)}>
-                    <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">{label}</span>
-                    <div className="mt-1 space-y-1">{items.map((item: string, i: number) => (
-                      <div key={i} className="flex gap-1.5 items-start group/item">
-                        <span className="text-xs text-zinc-400 mt-0.5 shrink-0">{i + 1}.</span>
-                        <input className="flex-1 bg-transparent text-xs text-zinc-600 dark:text-zinc-400 border-b border-transparent hover:border-zinc-300 focus:border-indigo-400 outline-none px-0.5 py-0.5" value={item} onChange={(e) => { const s = { ...spec, [key]: items.map((x: string, j: number) => j === i ? e.target.value : x) }; update({ reviewSpec: s as unknown as ScriptWizardData["reviewSpec"] }) }} />
-                        <button className="opacity-0 group-hover/item:opacity-100 text-xs text-red-400 hover:text-red-600 shrink-0" onClick={() => { const s = { ...spec, [key]: items.filter((_: string, j: number) => j !== i) }; update({ reviewSpec: s as unknown as ScriptWizardData["reviewSpec"] }) }}>×</button>
-                      </div>))}
-                      <button className="text-xs text-indigo-500 hover:text-indigo-600 mt-1" onClick={() => { const s = { ...spec, [key]: [...items, "新检查项"] }; update({ reviewSpec: s as unknown as ScriptWizardData["reviewSpec"] }) }}>+ 新增标准</button>
-                    </div>
-                  </div>
-                })}
-                <button className="text-xs text-indigo-500 hover:text-indigo-600 mt-2" onClick={() => update({ reviewSpec: undefined })}>恢复默认规范</button>
-              </div>
-            </details>
-            {data.reviewNotes && (() => {
-              const sections = [{ key: "逻辑", label: "逻辑检查", icon: "🧩", color: "border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/20" }, { key: "人设", label: "人设检查", icon: "👤", color: "border-emerald-200 dark:border-emerald-800 bg-emerald-50/50 dark:bg-emerald-950/20" }, { key: "节奏", label: "节奏检查", icon: "⏱", color: "border-amber-200 dark:border-amber-800 bg-amber-50/50 dark:bg-amber-950/20" }, { key: "悬念", label: "悬念检查", icon: "🔍", color: "border-purple-200 dark:border-purple-800 bg-purple-50/50 dark:bg-purple-950/20" }, { key: "合规", label: "合规检查", icon: "🛡", color: "border-red-200 dark:border-red-800 bg-red-50/50 dark:bg-red-950/20" }]
-              const parseSection = (text: string, label: string) => {
-                const re = new RegExp(`【${label}[检審]?[查核]?[：:]?】?\\s*([\\s\\S]*?)(?=【|【总体|$)`, "i")
-                const m = text.match(re); if (!m?.[1]?.trim()) return null
-                const lines = m[1].trim().split(/\n/).filter((l) => l.trim())
-                const fixed: string[] = []; const pending: string[] = []; const ignored: string[] = []
-                for (const line of lines) {
-                  const cleaned = line.replace(/^[-•]?\s*/, "").trim(); if (!cleaned) continue
-                  if (cleaned.startsWith("🚫")) ignored.push(cleaned.replace(/^🚫\s*已忽略\s*-\s*/, ""))
-                  else if (cleaned.startsWith("🔴")) pending.push(cleaned.replace(/^🔴\s*待修复\s*-\s*/, ""))
-                  else if (cleaned.startsWith("✅")) fixed.push(cleaned.replace(/^✅\s*已修复\s*-\s*/, ""))
-                  else if (pending.length === 0 && fixed.length === 0 && ignored.length === 0) fixed.push(cleaned)
-                  else pending.push(cleaned)
-                }
-                return { fixed, pending, ignored }
-              }
-              return <div className="space-y-3">{sections.map((s) => {
-                const parsed = parseSection(data.reviewNotes!, s.label.replace("检查", ""))
-                if (!parsed || (!parsed.fixed.length && !parsed.pending.length && !parsed.ignored.length)) return null
-                const total = parsed.fixed.length + parsed.pending.length + parsed.ignored.length
-                return <Card key={s.key} className={cn("border", s.color)}><CardHeader className="pb-2"><div className="flex items-center justify-between"><CardTitle className="text-sm flex items-center gap-2"><span>{s.icon}</span> {s.label}<Badge className="text-xs">{total} 条</Badge></CardTitle>{parsed.pending.length > 0 && <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={() => handleFix(s.key)} disabled={fixing === s.key}>{fixing === s.key ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}一键调整</Button>}</div></CardHeader><CardContent><ul className="space-y-1.5">
-                {parsed.pending.map((issue, i) => <li key={`p-${i}`} className="text-sm flex gap-2 items-start"><span className="text-red-500 shrink-0 mt-0.5">🔴</span><span className="text-zinc-700 dark:text-zinc-300 flex-1">{issue}</span><button className="text-xs text-zinc-400 hover:text-zinc-600 shrink-0 mt-0.5" onClick={() => handleIgnore(s.key, issue)}>忽略</button></li>)}
-                {parsed.fixed.map((issue, i) => <li key={`f-${i}`} className="text-sm flex gap-2 items-start opacity-50"><span className="text-emerald-500 shrink-0 mt-0.5">✅</span><span className="text-zinc-500 dark:text-zinc-500 line-through flex-1">{issue}</span></li>)}
-                {parsed.ignored.map((issue, i) => <li key={`i-${i}`} className="text-sm flex gap-2 items-start opacity-40"><span className="text-zinc-400 shrink-0 mt-0.5">✕</span><span className="text-zinc-400 dark:text-zinc-500 line-through flex-1">{issue}</span></li>)}
-                </ul></CardContent></Card>
-              })}</div>
-            })()}
-            <Card className="border-green-200 dark:border-green-800 bg-green-50/50 dark:bg-green-950/20"><CardContent className="pt-6"><h4 className="text-sm font-semibold mb-3">完成清单</h4><div className="space-y-1.5">{[{ done: !!data.topicId, l: "选题已确定" }, { done: !!data.logline, l: "一句话简介已写" }, { done: !!data.worldBuilding, l: "世界观已设定" }, { done: data.characters.length >= 4, l: `人物卡已完成（${data.characters.length}个）` }, { done: data.suspenseList.length > 0, l: `悬念清单已列（${data.suspenseList.length}条）` }, { done: !!data.storyOutline?.qi, l: "整体大纲已完成" }, { done: data.episodeOutlines.length > 0, l: `分集大纲已完成（${data.episodeOutlines.length}集）` }, { done: !!data.reviewNotes, l: "过审检查已完成" }].map((i) => <div key={i.l} className="flex items-center gap-2 text-sm"><span className={cn("h-4 w-4 rounded-full flex items-center justify-center text-[10px]", i.done ? "bg-green-500 text-white" : "bg-zinc-200 dark:bg-zinc-700 text-zinc-500")}>{i.done ? "✓" : " "}</span><span className={i.done ? "text-green-700 dark:text-green-400" : "text-zinc-500"}>{i.l}</span></div>)}</div></CardContent></Card>
-          </div>}
-          {step === 9 && <div className="space-y-4"><div className="flex items-center justify-between flex-wrap gap-2"><div><h3 className="text-lg font-bold">Step 9: 分场大纲</h3><p className="text-sm text-zinc-500 mt-1">每集按 AI 生成时长拆分为多个场景。</p></div><div className="flex items-center gap-3"><div className="flex items-center gap-1.5"><span className="text-xs text-zinc-500">集时长:</span><Input type="number" value={data.episodeDurationSeconds ?? 300} onChange={(e) => update({ episodeDurationSeconds: parseInt(e.target.value) || 300 })} className="h-8 w-16 text-sm" /><span className="text-xs text-zinc-400">秒</span></div><div className="flex items-center gap-1.5"><span className="text-xs text-zinc-500">AI生成:</span><Input type="number" value={data.aiGenerationDuration ?? 10} onChange={(e) => update({ aiGenerationDuration: parseInt(e.target.value) || 10 })} className="h-8 w-12 text-sm" /><span className="text-xs text-zinc-400">秒/场景</span></div>{(() => { const cnt = Math.max(4, Math.round((data.episodeDurationSeconds ?? 300) / (data.aiGenerationDuration ?? 10))); return <span className="text-xs text-zinc-500">≈ {cnt} 个场景</span> })()}</div></div>
+          {step === 8 && <div className="space-y-4"><div><h3 className="text-lg font-bold">Step 8: 分场大纲</h3><p className="text-sm text-zinc-500 mt-1">每集按 AI 生成时长拆分为多个场景。</p></div>
             {data.episodeOutlines.length > 0 && <div className="flex gap-1 flex-wrap">{data.episodeOutlines.map((ep) => { const active = (data.activeSceneEpisode || 1) === ep.episodeNum; const hasScenes = !!(episodeScenes[ep.episodeNum]?.length); return <button key={ep.episodeNum} onClick={() => update({ activeSceneEpisode: ep.episodeNum })} className={cn("px-3 py-1.5 rounded-lg text-xs font-medium transition-colors", active ? "bg-indigo-600 text-white" : hasScenes ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 hover:bg-emerald-200" : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 hover:bg-zinc-200")}>第{ep.episodeNum}集 {hasScenes ? "✓" : ""}</button> })}</div>}
-            <div className="flex gap-2"><Button variant="outline" onClick={() => genScenes(data.activeSceneEpisode || 1)} disabled={!!generating} className="gap-2">{generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}AI 生成第{data.activeSceneEpisode || 1}集分场</Button><Button variant="outline" size="sm" onClick={() => addSc(data.activeSceneEpisode || 1)}><Plus className="h-3.5 w-3.5" /> 添加</Button></div>
-            <div className="space-y-2">{(episodeScenes[data.activeSceneEpisode || 1] || []).map((s) => <Card key={s.sceneNum}><CardHeader className="pb-2"><div className="flex items-center justify-between"><CardTitle className="text-sm">场景 {s.sceneNum}</CardTitle><Button variant="ghost" size="icon" onClick={() => delSc(data.activeSceneEpisode || 1, s.sceneNum)}><Trash2 className="h-3.5 w-3.5 text-red-500" /></Button></div></CardHeader><CardContent className="space-y-2"><div className="grid grid-cols-2 gap-2"><div><label className="text-xs text-zinc-500">时长（秒）</label><Input type="number" value={s.durationSeconds || ""} onChange={(e) => updSc(data.activeSceneEpisode || 1, s.sceneNum, { durationSeconds: parseInt(e.target.value) || 0 })} className="h-8 text-sm" placeholder="30" /></div><div><label className="text-xs text-zinc-500">地点</label><Input value={s.location} onChange={(e) => updSc(data.activeSceneEpisode || 1, s.sceneNum, { location: e.target.value })} className="h-8 text-sm" /></div></div><div className="grid grid-cols-2 gap-2"><div><label className="text-xs text-zinc-500">人物</label><Input value={s.characters.join(",")} onChange={(e) => updSc(data.activeSceneEpisode || 1, s.sceneNum, { characters: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} className="h-8 text-sm" /></div></div><div><label className="text-xs text-zinc-500">概要</label><Input value={s.summary} onChange={(e) => updSc(data.activeSceneEpisode || 1, s.sceneNum, { summary: e.target.value })} className="h-8 text-sm" /></div><div><label className="text-xs text-zinc-500">场景目的</label><Input value={s.purpose} onChange={(e) => updSc(data.activeSceneEpisode || 1, s.sceneNum, { purpose: e.target.value })} placeholder="推进了什么？" className="h-8 text-sm" /></div></CardContent></Card>)}</div>
-            {(() => { const scenes = episodeScenes[data.activeSceneEpisode || 1] || []; const total = scenes.reduce((sum, s) => sum + (s.durationSeconds || 0), 0); const target = data.episodeDurationSeconds ?? 300; const diff = Math.abs(total - target); if (scenes.length === 0) return null; const aiGen = data.aiGenerationDuration ?? 10; return <div className={cn("text-xs mt-2", diff > 30 ? "text-red-500" : diff > 10 ? "text-amber-500" : "text-emerald-500")}>⏱ {scenes.length} 场景 × ~{aiGen}s | 总 {Math.floor(total / 60)}分{total % 60}秒 / 目标 {Math.floor(target / 60)}分{target % 60}秒</div> })()}
+            <div className="flex gap-2"><Button variant="outline" onClick={() => genScenes(data.activeSceneEpisode || 1)} disabled={!!generating || !!(data.episodeOutlines.find(e => e.episodeNum === (data.activeSceneEpisode || 1))?.locked)} className="gap-2">{generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}AI 生成分场</Button><Button variant="outline" size="sm" onClick={addScenesFive} disabled={!!generating || !!(data.episodeOutlines.find(e => e.episodeNum === (data.activeSceneEpisode || 1))?.locked)} className="gap-1">{generating === "addScenes" ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}+5场</Button><Button variant="outline" size="sm" className="text-red-500 hover:text-red-600" disabled={!!(data.episodeOutlines.find(e => e.episodeNum === (data.activeSceneEpisode || 1))?.locked)} onClick={() => { const ep = data.activeSceneEpisode || 1; const sc = { ...(data.episodeSceneOutlines || {}) }; delete sc[ep]; update({ episodeSceneOutlines: sc }) }}><Trash2 className="h-3 w-3" /> 删除整集分场</Button></div>
+            <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-700">
+              <table className="w-full text-xs">
+                <thead className="bg-zinc-50 dark:bg-zinc-800/50">
+                  <tr>
+                    <th className="px-2 py-1.5 text-left font-medium w-10">#</th>
+                    <th className="px-2 py-1.5 text-left font-medium w-20">时长(秒)</th>
+                    <th className="px-2 py-1.5 text-left font-medium w-24">地点</th>
+                    <th className="px-2 py-1.5 text-left font-medium w-24">人物</th>
+                    <th className="px-2 py-1.5 text-left font-medium">概要</th>
+                    <th className="px-2 py-1.5 text-left font-medium">目的</th>
+                    <th className="px-2 py-1.5 text-center font-medium w-10"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(episodeScenes[data.activeSceneEpisode || 1] || []).map((s, i) => (
+                    <tr key={`${s.sceneNum}-${i}`} className={cn("border-t border-zinc-100 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800/30", s.locked && "opacity-60")}>
+                      <td className="px-2 py-1 text-zinc-400">{s.sceneNum}{s.locked ? " 🔒" : ""}</td>
+                      <td className="px-2 py-1"><Input type="number" value={s.durationSeconds || ""} onChange={(e) => updSc(data.activeSceneEpisode || 1, s.sceneNum, { durationSeconds: parseInt(e.target.value) || 0 })} disabled={s.locked} className="h-7 text-xs w-16" /></td>
+                      <td className="px-2 py-1"><Input value={s.location} onChange={(e) => updSc(data.activeSceneEpisode || 1, s.sceneNum, { location: e.target.value })} disabled={s.locked} className="h-7 text-xs w-full" /></td>
+                      <td className="px-2 py-1"><Input value={s.characters.join(",")} onChange={(e) => updSc(data.activeSceneEpisode || 1, s.sceneNum, { characters: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} disabled={s.locked} className="h-7 text-xs w-full" /></td>
+                      <td className="px-2 py-1"><Input value={s.summary} onChange={(e) => updSc(data.activeSceneEpisode || 1, s.sceneNum, { summary: e.target.value })} disabled={s.locked} className="h-7 text-xs w-full" /></td>
+                      <td className="px-2 py-1"><Input value={s.purpose} onChange={(e) => updSc(data.activeSceneEpisode || 1, s.sceneNum, { purpose: e.target.value })} disabled={s.locked} className="h-7 text-xs w-full" /></td>
+                      <td className="px-2 py-1 text-center"><Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => delSc(data.activeSceneEpisode || 1, s.sceneNum)} disabled={s.locked}>{s.locked ? <Lock className="h-3 w-3 text-zinc-400" /> : <Trash2 className="h-3 w-3 text-red-400" />}</Button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {(() => { const scenes = episodeScenes[data.activeSceneEpisode || 1] || []; const total = scenes.reduce((sum, s) => sum + (s.durationSeconds || 0), 0); const target = data.episodeDurationSeconds ?? 300; const diff = Math.abs(total - target); if (scenes.length === 0) return null; const avg = scenes.length > 0 ? Math.round(total / scenes.length) : 0; return <div className={cn("text-xs mt-2", diff > 30 ? "text-red-500" : diff > 10 ? "text-amber-500" : "text-emerald-500")}>⏱ {scenes.length} 场景 | 平均 ~{avg}s | 总 {Math.floor(total / 60)}分{total % 60}秒 / 目标 {Math.floor(target / 60)}分{target % 60}秒</div> })()}
             {Object.keys(episodeScenes).length > 0 && <div className="flex justify-end"><Button variant="primary" onClick={next}>保存并继续 <ArrowRight className="h-4 w-4" /></Button></div>}
           </div>}
-          {step === 10 && <div className="space-y-4"><div className="flex items-center justify-between"><div><h3 className="text-lg font-bold">Step 10: 剧本正文</h3><p className="text-sm text-zinc-500 mt-1">分集编写，选择集数后可由 AI 生成或手动编写。</p></div></div>
-            {data.episodeOutlines.length > 0 && <div className="flex gap-1 flex-wrap">{data.episodeOutlines.map((ep) => { const active = (data.activeEpisode || 1) === ep.episodeNum; const hasContent = !!episodeScripts[ep.episodeNum]; return <button key={ep.episodeNum} onClick={() => update({ activeEpisode: ep.episodeNum })} className={cn("px-3 py-1.5 rounded-lg text-xs font-medium transition-colors", active ? "bg-indigo-600 text-white" : hasContent ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 hover:bg-emerald-200" : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 hover:bg-zinc-200")}>第{ep.episodeNum}集 {hasContent ? "✓" : ""}</button> })}</div>}
-            <Button variant="outline" onClick={() => genScript(data.activeEpisode || 1)} disabled={!!generating} className="gap-2">{generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}AI 生成第{data.activeEpisode || 1}集剧本</Button>
-            <Textarea placeholder="【场景1：总裁办公室 - 白天】&#10;顾辰（冷漠）：这份合同，你签也得签。&#10;林雪（愤怒）：你别欺人太甚！" value={episodeScripts[data.activeEpisode || 1] || ""} onChange={(e) => update({ episodeScripts: { ...episodeScripts, [data.activeEpisode || 1]: e.target.value } })} rows={20} className="font-mono text-sm" />
+          {step === 9 && <div className="space-y-4"><div className="flex items-center justify-between"><div><h3 className="text-lg font-bold">Step 9: 剧本正文</h3><p className="text-sm text-zinc-500 mt-1">小说式叙事，每个场景 200-400 字完整故事。</p></div></div>
+            {data.episodeOutlines.length > 0 && <div className="flex gap-1 flex-wrap">{data.episodeOutlines.map((ep) => { const active = (data.activeEpisode || 1) === ep.episodeNum; const hasContent = !!episodeScripts[ep.episodeNum]; const isLocked = scriptLockedEpNums.has(ep.episodeNum); return <button key={ep.episodeNum} onClick={() => update({ activeEpisode: ep.episodeNum })} className={cn("px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1", active ? "bg-indigo-600 text-white" : isLocked ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 hover:bg-amber-200 cursor-not-allowed" : hasContent ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 hover:bg-emerald-200" : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 hover:bg-zinc-200")}>第{ep.episodeNum}集 {isLocked ? "🔒" : hasContent ? "✓" : ""}</button> })}</div>}
+            <Button variant="outline" onClick={() => genScript(data.activeEpisode || 1)} disabled={!!generating || scriptLockedEpNums.has(data.activeEpisode || 1)} className="gap-2">{generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}AI 生成第{data.activeEpisode || 1}集剧本{scriptLockedEpNums.has(data.activeEpisode || 1) ? "（已锁定）" : ""}</Button><Button variant="outline" size="sm" className="text-red-500 hover:text-red-600" disabled={scriptLockedEpNums.has(data.activeEpisode || 1)} onClick={() => { const ep = data.activeEpisode || 1; const sc = { ...episodeScripts }; delete sc[ep]; update({ episodeScripts: sc }) }}><Trash2 className="h-3 w-3" /> 删除本集剧本</Button>
+            {scriptLockedEpNums.has(data.activeEpisode || 1) ? (
+              <div className="relative">
+                <Textarea value={episodeScripts[data.activeEpisode || 1] || ""} disabled rows={20} className="text-sm leading-relaxed opacity-60" />
+                <div className="absolute inset-0 flex items-center justify-center bg-zinc-50/50 dark:bg-zinc-900/50 rounded-lg pointer-events-none">
+                  <span className="text-sm text-amber-600 dark:text-amber-400 font-medium flex items-center gap-1.5">
+                    <Lock className="h-4 w-4" />已锁定 — 分场大纲已推进到第 {sceneMaxEp} 集，前 {sceneMaxEp - 1} 集剧本受保护
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <Textarea placeholder="===SCENE 1===\n深夜的办公室只剩下电脑屏幕的冷光。林深盯着那行不断跳动的错误代码，指尖在键盘上微微发抖——三年的心血，全线崩盘。\n\n&#34;深哥，服务器被锁了。&#34;周明的声音从身后传来，带着一丝他从未听过的平静。\n\n林深猛地转身，对上周明那双不再掩饰的眼睛。&#34;是你？&#34;\n\n周明没回答，只是把一份文件推到他面前——股权转让协议，签名处早就盖好了章。" value={episodeScripts[data.activeEpisode || 1] || ""} onChange={(e) => update({ episodeScripts: { ...episodeScripts, [data.activeEpisode || 1]: e.target.value } })} rows={20} className="text-sm leading-relaxed" />
+            )}
             {Object.keys(episodeScripts).length > 0 && <div className="flex justify-end"><Button variant="primary" onClick={next}>完成</Button></div>}
           </div>}
           <div className="flex items-center justify-between pt-6 border-t border-zinc-200 dark:border-zinc-800">
             <Button variant="ghost" onClick={prev} disabled={step === 1}><ArrowLeft className="h-4 w-4" /> 上一步</Button>
             <Button variant="outline" onClick={handleSave} disabled={saving} className="gap-1.5">{saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}保存进度</Button>
-            <Button variant="primary" onClick={next} disabled={step === 10}>下一步 <ArrowRight className="h-4 w-4" /></Button>
+            <Button variant="primary" onClick={next} disabled={step === 9}>下一步 <ArrowRight className="h-4 w-4" /></Button>
           </div>
         </div>
       </main>
@@ -762,7 +942,10 @@ function applyFix(
       if (!content) continue
       const ex = (l: string) => { const r = new RegExp(`${l}[：:]\\s*(.+)`, "i"); return content.match(r)?.[1]?.trim() || "" }
       const desc = ex("描述"); if (!desc) continue
-      newItems.push({ id: crypto.randomUUID(), type: (ex("类型") || "hook") as SuspenseItem["type"], description: desc, revealEpisode: parseInt(ex("揭晓集")) || undefined, status: "pending" })
+      const newItem: SuspenseItem = { id: crypto.randomUUID(), type: (ex("类型") || "hook") as SuspenseItem["type"], description: desc, revealEpisode: parseInt(ex("揭晓集")) || undefined, status: "pending" }
+      // Dedup: skip if similar description already exists
+      const isDuplicate = susp.some(s => s.description === desc || (s.description.length > 10 && desc.length > 10 && s.description.includes(desc.substring(0, 10)) || desc.includes(s.description.substring(0, 10))))
+      if (!isDuplicate) newItems.push(newItem)
     }
     if (newItems.length) setter({ eps: episodes, chars, susp: [...susp, ...newItems] })
   } else {

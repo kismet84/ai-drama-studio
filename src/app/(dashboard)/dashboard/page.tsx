@@ -1,26 +1,31 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import Link from "next/link"
+import { useRouter } from "next/navigation"
 import {
   Film,
-  MoreHorizontal,
   Play,
   Clock,
   Edit3,
   Trash2,
+  Check,
+  X,
+  Sparkles,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Skeleton } from "@/components/ui/skeleton"
-import { quickCreateProject } from "./actions"
+import { quickCreateProject, suggestProjectTitle } from "./actions"
 import type { ProjectSummary } from "@/types"
 
 const statusLabels: Record<string, string> = {
@@ -47,9 +52,14 @@ const genreColors: Record<string, string> = {
 }
 
 export default function DashboardPage() {
+  const router = useRouter()
   const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editTitle, setEditTitle] = useState("")
+  const [editDesc, setEditDesc] = useState("")
+  const [deleteTarget, setDeleteTarget] = useState<ProjectSummary | null>(null)
 
   useEffect(() => {
     fetchProjects()
@@ -70,13 +80,41 @@ export default function DashboardPage() {
   }
 
   async function deleteProject(id: string) {
-    if (!confirm("确定要删除这个项目吗？此操作不可撤销。")) return
     try {
       await fetch(`/api/projects/${id}`, { method: "DELETE" })
       setProjects((prev) => prev.filter((p) => p.id !== id))
     } catch {
       alert("删除失败")
     }
+  }
+
+  async function saveProjectEdit(id: string) {
+    try {
+      await fetch(`/api/projects/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: editTitle, description: editDesc }),
+      })
+      setProjects((prev) => prev.map((p) => p.id === id ? { ...p, title: editTitle, description: editDesc } : p))
+      setEditingId(null)
+    } catch {
+      alert("保存失败")
+    }
+  }
+
+  async function aiSuggestTitle(id: string) {
+    try {
+      const title = await suggestProjectTitle(id)
+      if (title) setEditTitle(title)
+    } catch {
+      // ignore
+    }
+  }
+
+  function startEdit(project: ProjectSummary) {
+    setEditingId(project.id)
+    setEditTitle(project.title)
+    setEditDesc(project.description || "")
   }
 
   if (loading) {
@@ -144,76 +182,100 @@ export default function DashboardPage() {
       {/* Project Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {projects.map((project) => (
-          <Card
-            key={project.id}
-            className="group hover:shadow-md transition-all duration-200 hover:border-indigo-200 dark:hover:border-indigo-800"
-          >
-            <CardHeader className="pb-3">
-              <div className="flex items-start justify-between">
-                <div className="flex-1 min-w-0">
-                  <CardTitle className="text-base truncate">
-                    <Link
-                      href={`/studio/${project.id}/script`}
-                      className="hover:text-indigo-600 transition-colors"
-                    >
-                      {project.title}
-                    </Link>
-                  </CardTitle>
-                  <CardDescription className="mt-1 line-clamp-2">
-                    {project.description || "暂无描述"}
-                  </CardDescription>
+          <div key={project.id} className="flex flex-col">
+            <Card
+              className="hover:shadow-md transition-all duration-200 hover:border-indigo-200 dark:hover:border-indigo-800 cursor-pointer flex-1"
+              onClick={() => { if (editingId !== project.id) router.push(`/studio/${project.id}/script`) }}
+            >
+              <CardHeader className="pb-3">
+                <div className="flex items-start justify-between">
+                  <div className="flex-1 min-w-0">
+                    {editingId === project.id ? (
+                      <div className="space-y-1.5">
+                        <div className="flex gap-1">
+                          <Input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} className="h-8 text-sm font-semibold flex-1" autoFocus />
+                          <Button variant="outline" size="sm" className="h-8 text-xs gap-1 shrink-0" onClick={() => aiSuggestTitle(project.id)}>
+                            <Sparkles className="h-3 w-3" /> AI
+                          </Button>
+                        </div>
+                        <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} placeholder="项目简介" className="h-7 text-xs" />
+                        <div className="flex gap-1">
+                          <Button variant="ghost" size="sm" className="h-7 text-xs text-emerald-600" onClick={() => saveProjectEdit(project.id)}><Check className="h-3 w-3 mr-1" />保存</Button>
+                          <Button variant="ghost" size="sm" className="h-7 text-xs text-zinc-500" onClick={() => setEditingId(null)}><X className="h-3 w-3 mr-1" />取消</Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <CardTitle className="text-base truncate">
+                          {project.title}
+                        </CardTitle>
+                        <CardDescription className="mt-1 line-clamp-2">
+                          {project.description || "暂无描述"}
+                        </CardDescription>
+                      </>
+                    )}
+                  </div>
                 </div>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="icon" className="shrink-0 -mr-2">
-                      <MoreHorizontal className="h-4 w-4" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem asChild>
-                      <Link href={`/studio/${project.id}/script`}>
-                        <Edit3 className="h-4 w-4 mr-2" />
-                        编辑项目
-                      </Link>
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      className="text-red-600"
-                      onClick={() => deleteProject(project.id)}
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {project.genre && (
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                        genreColors[project.genre] || "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                      }`}
                     >
-                      <Trash2 className="h-4 w-4 mr-2" />
-                      删除项目
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <div className="flex items-center gap-2 flex-wrap">
-                {project.genre && (
-                  <span
-                    className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                      genreColors[project.genre] || "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
-                    }`}
-                  >
-                    {project.genre}
+                      {project.genre}
+                    </span>
+                  )}
+                  <Badge variant={statusVariants[project.status] || "secondary"}>
+                    {statusLabels[project.status] || project.status}
+                  </Badge>
+                  <span className="text-xs text-zinc-400 dark:text-zinc-500 ml-auto flex items-center gap-1">
+                    <Film className="h-3 w-3" />
+                    {project.episodeCount} 集
                   </span>
-                )}
-                <Badge variant={statusVariants[project.status] || "secondary"}>
-                  {statusLabels[project.status] || project.status}
-                </Badge>
-                <span className="text-xs text-zinc-400 dark:text-zinc-500 ml-auto flex items-center gap-1">
-                  <Film className="h-3 w-3" />
-                  {project.episodeCount} 集
-                </span>
+                </div>
+                <div className="mt-3 flex items-center gap-1 text-xs text-zinc-400">
+                  <Clock className="h-3 w-3" />
+                  {new Date(project.updatedAt).toLocaleDateString("zh-CN")}
+                </div>
+              </CardContent>
+            </Card>
+            {/* 操作按钮在卡片外 */}
+            {editingId !== project.id && (
+              <div className="flex items-center gap-1 mt-1.5">
+                <Button variant="ghost" size="sm" className="h-6 text-xs text-zinc-400 hover:text-zinc-600" onClick={() => startEdit(project)}>
+                  <Edit3 className="h-3 w-3 mr-1" />
+                  重命名
+                </Button>
+                <Button variant="ghost" size="sm" className="h-6 text-xs text-zinc-400 hover:text-red-500" onClick={() => setDeleteTarget(project)}>
+                  <Trash2 className="h-3 w-3 mr-1" />
+                  删除
+                </Button>
               </div>
-              <div className="mt-3 flex items-center gap-1 text-xs text-zinc-400">
-                <Clock className="h-3 w-3" />
-                {new Date(project.updatedAt).toLocaleDateString("zh-CN")}
-              </div>
-            </CardContent>
-          </Card>
+            )}
+          </div>
         ))}
       </div>
+
+      {/* 删除确认弹窗 */}
+      <Dialog open={!!deleteTarget} onOpenChange={(open) => { if (!open) setDeleteTarget(null) }}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>确认删除</DialogTitle>
+            <DialogDescription>
+              确定要删除项目「{deleteTarget?.title}」吗？此操作不可撤销，所有剧本、角色、素材数据将被永久删除。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" size="sm" onClick={() => setDeleteTarget(null)}>取消</Button>
+            <Button variant="primary" size="sm" className="bg-red-600 hover:bg-red-700" onClick={() => { if (deleteTarget) { deleteProject(deleteTarget.id); setDeleteTarget(null) } }}>
+              确认删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

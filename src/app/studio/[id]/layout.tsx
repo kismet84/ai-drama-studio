@@ -5,7 +5,6 @@ import {
   Palette,
   Mic,
   Clapperboard,
-  History,
 } from "lucide-react"
 import { cn } from "@/lib/utils/cn"
 
@@ -55,15 +54,6 @@ export default async function StudioLayout({ children, params }: StudioLayoutPro
                 </div>
               </Link>
             ))}
-          </div>
-          <div className="px-3 border-t border-zinc-200 dark:border-zinc-700 pt-1">
-            <Link
-              href={`/studio/${id}/fix-log`}
-              className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-zinc-500 hover:text-zinc-700 hover:bg-zinc-100 dark:hover:text-zinc-300 dark:hover:bg-zinc-800 transition-colors"
-            >
-              <History className="h-4 w-4" />
-              修复日志
-            </Link>
           </div>
         </nav>
       </aside>
