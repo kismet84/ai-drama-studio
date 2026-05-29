@@ -388,7 +388,8 @@ export default function ScriptWizardPage() {
           .map((c) => `${c.name}(${c.role}): ${c.personality}`)
           .join("\n")
         const prompt = `${data.logline || ""}\n\n当前编写：第${epNum}集`
-        const result = await generateScriptContent(prompt, scenesStr || "暂无分场", charsStr || "暂无角色")
+        const factsStr = (data.facts || []).map(f => `· ${f.title}：${f.detail}（相关度：${f.relevance}）`).join("\n")
+        const result = await generateScriptContent(prompt, scenesStr || "暂无分场", charsStr || "暂无角色", factsStr || undefined)
         const current = data.episodeScripts || {}
         update({
           episodeScripts: { ...current, [epNum]: result },

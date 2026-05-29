@@ -370,11 +370,12 @@ ${existingScenes}${charSection}
   return scenes
 }
 
-export async function generateScriptContent(logline: string, sceneOutlines: string, characters: string): Promise<string> {
+export async function generateScriptContent(logline: string, sceneOutlines: string, characters: string, facts?: string): Promise<string> {
   const basePrompt = buildDeepSeekScriptPrompt({ logline, sceneOutlines, characters })
+  const factsSection = facts ? `\n\n【参考实事（可用于剧情细节，但不要照搬）】\n${facts}` : ""
 
   return generateText(
-    `${basePrompt}
+    `${basePrompt}${factsSection}
 
 要求：
 1. ⚠️ 最高铁律：场景总数必须与大纲完全一致。大纲有多少个场景，就输出多少个 ===SCENE=== 块。禁止新增场景、禁止合并场景、禁止跳过场景。请先数一遍大纲里有几个场景，确保输出数量一模一样
