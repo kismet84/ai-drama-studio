@@ -289,6 +289,8 @@ export interface ScriptWizardData {
   // Step 10 - 剧本正文
   activeEpisode?: number
   episodeScripts?: Record<number, string>
+  scriptUnlockedEpNums?: number[]  // 手动解锁的剧本集号，不受分场进度锁限制
+  unlockedScenes?: string[]         // 手动解锁的分场 "epNum-sceneNum"，不受剧本锁限制
   // 修复日志
   fixLogs?: FixLogEntry[]
 }

@@ -84,9 +84,13 @@ function syncLockedStatus(data: ScriptWizardData): ScriptWizardData {
     locked: allLockedEpNums.has(ep.episodeNum),
   }))
   const syncedSceneOutlines: Record<number, SceneOutline[]> = {}
+  const unlockedSceneKeys = new Set(data.unlockedScenes || [])
   for (const [epNum, scenes] of Object.entries(sceneOutlines)) {
-    const locked = allLockedEpNums.has(parseInt(epNum))
-    syncedSceneOutlines[parseInt(epNum)] = scenes.map(s => ({ ...s, locked }))
+    const epLocked = allLockedEpNums.has(parseInt(epNum))
+    syncedSceneOutlines[parseInt(epNum)] = scenes.map(s => ({
+      ...s,
+      locked: epLocked && !unlockedSceneKeys.has(`${epNum}-${s.sceneNum}`),
+    }))
   }
 
   // 角色锁定：在任一锁定集的分场大纲 characters 数组中出场 → 锁定
@@ -719,19 +723,23 @@ export default function ScriptWizardPage() {
   }, [data.episodeOutlines, update])
 
   const unlockScene = useCallback((epNum: number, sceneNum: number) => {
-    const current = data.episodeSceneOutlines || {}
-    const scenes = current[epNum] || []
-    update({
-      episodeSceneOutlines: {
-        ...current,
-        [epNum]: scenes.map(s => s.sceneNum === sceneNum ? { ...s, locked: false } : s),
-      },
-    })
-  }, [data.episodeSceneOutlines, update])
+    const key = `${epNum}-${sceneNum}`
+    const existing = data.unlockedScenes || []
+    if (!existing.includes(key)) {
+      update({ unlockedScenes: [...existing, key] })
+    }
+  }, [data.unlockedScenes, update])
 
   const unlockSuspense = useCallback((id: string) => {
     updSusp(id, { locked: false })
   }, [updSusp])
+
+  const unlockScriptEp = useCallback((epNum: number) => {
+    const existing = data.scriptUnlockedEpNums || []
+    if (!existing.includes(epNum)) {
+      update({ scriptUnlockedEpNums: [...existing, epNum] })
+    }
+  }, [data.scriptUnlockedEpNums, update])
 
   if (!loaded) {
     return (
@@ -747,9 +755,10 @@ export default function ScriptWizardPage() {
 
   // 分场大纲进度锁：场景大纲到了第 N 集 → 锁定前 N-1 集的剧本正文
   const sceneMaxEp = Math.max(0, ...Object.keys(episodeScenes).map(Number))
+  const manualUnlocked = new Set(data.scriptUnlockedEpNums || [])
   const scriptLockedEpNums = new Set<number>()
   for (let i = 1; i < sceneMaxEp; i++) {
-    scriptLockedEpNums.add(i)
+    if (!manualUnlocked.has(i)) scriptLockedEpNums.add(i)
   }
 
   const completedSteps: Set<number> = (() => {
@@ -923,6 +932,7 @@ export default function ScriptWizardPage() {
                 <div className="absolute inset-0 flex items-center justify-center bg-zinc-50/50 dark:bg-zinc-900/50 rounded-lg pointer-events-none">
                   <span className="text-sm text-amber-600 dark:text-amber-400 font-medium flex items-center gap-1.5">
                     <Lock className="h-4 w-4" />已锁定 — 分场大纲已推进到第 {sceneMaxEp} 集，前 {sceneMaxEp - 1} 集剧本受保护
+                  <button className="mt-2 text-xs text-indigo-500 hover:text-indigo-700 underline pointer-events-auto" onClick={() => unlockScriptEp(data.activeEpisode || 1)}>解锁本集</button>
                   </span>
                 </div>
               </div>
