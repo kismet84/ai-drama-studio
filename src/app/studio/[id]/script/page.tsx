@@ -601,10 +601,11 @@ export default function ScriptWizardPage() {
   }, [data.totalEpisodes, update])
 
   const clearEpsFrom = useCallback((fromEp: number) => {
-    update({
-      episodeOutlines: data.episodeOutlines.filter(e => e.episodeNum < fromEp),
-    })
-  }, [data.episodeOutlines, update])
+    const next = { ...data, episodeOutlines: data.episodeOutlines.filter(e => e.episodeNum < fromEp) }
+    update(next)
+    // 立即持久化，防止刷新丢失
+    saveScriptData(projectId, next).catch(() => {})
+  }, [data, projectId, update])
 
   const updEp = useCallback(
     (epNum: number, patch: Partial<EpisodeOutline>) => {
