@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/db/prisma"
 import { generateText } from "@/lib/ai"
+import { buildDeepSeekScriptPrompt } from "@/lib/ai/prompts"
 import type { ScriptWizardData, CharacterCard, SuspenseItem, EpisodeOutline, SceneOutline, ReviewSpec } from "@/types"
 import { DEFAULT_REVIEW_SPEC } from "@/types"
 
@@ -370,20 +371,14 @@ ${existingScenes}${charSection}
 }
 
 export async function generateScriptContent(logline: string, sceneOutlines: string, characters: string): Promise<string> {
+  const basePrompt = buildDeepSeekScriptPrompt({ logline, sceneOutlines, characters })
+
   return generateText(
-    `你是专业网络小说作家，擅长快节奏、强冲突、高爽点的短篇小说。以下分场大纲中每个场景都必须逐条编写，禁止合并、禁止跳过、禁止概括。即使相邻场景地点人物完全相同也必须独立成段。
-
-简介：${logline}
-
-【分场大纲 - 必须逐条编写】
-${sceneOutlines}
-
-【角色信息】
-${characters}
+    `${basePrompt}
 
 要求：
 1. 网络小说叙事风格：第三人称叙述 + 自然嵌入对话，不要用剧本格式
-2. 每个场景 200-400 字，自成一段完整的小故事，有起有落
+2. ⚠️ 铁律：每个 ===SCENE N=== 块的汉字数必须在 200-400 字之间。少于 200 字说明描写不足，超过 400 字说明拖沓冗余。请在生成后自行数一遍每个场景的字数
 3. 对话用中文引号"直接引用"，无需标注情绪标签
 4. ⚠️ 段与段之间必须空一行（用空行分隔），每段2-4句话，禁止连续大段文字
 5. 保持快节奏，每段推动剧情，避免拖沓的环境描写
