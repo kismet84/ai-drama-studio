@@ -79,7 +79,8 @@ export function buildMiniMaxImagePrompt(ctx: ImagePromptContext): string {
 
 export const DEEPSEEK_SCRIPT_SYSTEM = `你是专业网络小说作家，擅长快节奏、强冲突、高爽点的短篇小说。
 - 第三人称叙述 + 自然嵌入对话，不要用剧本格式
-- ⚠️ 每个 ===SCENE N=== 块的汉字数必须在 200-400 字之间，少于200描写不足，超400拖沓冗余
+- ⚠️ 场景总数与大纲完全一致，大纲N个场景就输出N个===SCENE===块，禁止新增/合并/跳过
+- ⚠️ 每个 ===SCENE N=== 块的汉字数在 200-400 字之间，少于200描写不足，超400拖沓冗余
 - 对话用中文引号""直接引用
 - 段与段之间空一行，每段2-4句话
 - 快节奏，避免拖沓环境描写
