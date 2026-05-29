@@ -313,11 +313,13 @@ export default function ScriptWizardPage() {
       const scripts = data.episodeScripts || {}
       const lockedEpNums = new Set(Object.keys(scripts).map(Number).filter(n => scripts[n]?.trim()))
 
-      // 从已有大纲末位之后开始生成，每次 10 集
-      const existingMax = oldOutlines.length > 0 ? Math.max(...oldOutlines.map(e => e.episodeNum)) : 0
+      // 起始点 = max(已有大纲末位, 已写剧本末位) + 1
+      const outlineMax = oldOutlines.length > 0 ? Math.max(...oldOutlines.map(e => e.episodeNum)) : 0
+      const scriptMax = lockedEpNums.size > 0 ? Math.max(...lockedEpNums) : 0
+      const existingMax = Math.max(outlineMax, scriptMax)
       const startEp = existingMax + 1
       const epCount = data.totalEpisodes || 12
-      const BATCH = 10
+      const BATCH = 5
 
       if (startEp > epCount) {
         alert(`已生成全部 ${epCount} 集，请先增加总集数再生成`)
@@ -325,6 +327,10 @@ export default function ScriptWizardPage() {
       }
 
       const batchSize = Math.min(BATCH, epCount - startEp + 1)
+
+      // 清除 startEp 及以后的所有旧大纲
+      const trimmed = oldOutlines.filter(e => e.episodeNum < startEp)
+
       const batch = await generateEpisodeOutlines(
         data.logline || "",
         outlineStr,
@@ -334,15 +340,7 @@ export default function ScriptWizardPage() {
         charsStr
       )
 
-      // 合并：锁定集 + 旧非锁定集 + 新生成
-      const merged = oldOutlines
-        .filter(e => lockedEpNums.has(e.episodeNum))
-        .concat(
-          oldOutlines.filter(e => !lockedEpNums.has(e.episodeNum) && e.episodeNum < startEp),
-          batch
-        )
-
-      update({ episodeOutlines: merged.sort((a, b) => a.episodeNum - b.episodeNum) })
+      update({ episodeOutlines: [...trimmed, ...batch].sort((a, b) => a.episodeNum - b.episodeNum) })
     })
   }, [scheduleGenerate, data.logline, data.storyOutline, data.totalEpisodes, data.characters, data.episodeScripts, data.episodeOutlines, data.episodeScripts, update])
 
@@ -849,7 +847,7 @@ export default function ScriptWizardPage() {
             {data.storyOutline?.qi && <div className="flex justify-end"><Button variant="primary" onClick={next}>保存并继续 <ArrowRight className="h-4 w-4" /></Button></div>}
           </div>}
           {step === 7 && <div className="space-y-4"><div><h3 className="text-lg font-bold">Step 7: 分集大纲</h3><p className="text-sm text-zinc-500 mt-1">每集：标题、概要、核心冲突、结尾钩子。</p></div>
-            <div className="flex gap-2 items-center"><Button variant="outline" onClick={genEps} disabled={!!generating} className="gap-2">{generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}生成下10集</Button><Button variant="outline" size="sm" onClick={addEpsSlot} className="gap-1"><Plus className="h-3 w-3" />+10集</Button><div className="flex items-center gap-1.5 ml-auto"><span className="text-xs text-zinc-500">总集数:</span><Input type="number" value={data.totalEpisodes || 12} onChange={(e) => update({ totalEpisodes: parseInt(e.target.value) || 12 })} className="h-8 w-16 text-sm" /></div></div>
+            <div className="flex gap-2 items-center"><Button variant="outline" onClick={genEps} disabled={!!generating} className="gap-2">{generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}生成下5集</Button><Button variant="outline" size="sm" onClick={addEpsSlot} className="gap-1"><Plus className="h-3 w-3" />+5集</Button><div className="flex items-center gap-1.5 ml-auto"><span className="text-xs text-zinc-500">总集数:</span><Input type="number" value={data.totalEpisodes || 12} onChange={(e) => update({ totalEpisodes: parseInt(e.target.value) || 12 })} className="h-8 w-16 text-sm" /></div></div>
             <div className="space-y-2">{(() => { const GROUP = 10; const groups: EpisodeOutline[][] = []; for (let i = 0; i < data.episodeOutlines.length; i += GROUP) groups.push(data.episodeOutlines.slice(i, i + GROUP)); const saved = data.collapsedEpisodeGroups; const hasSaved = saved && saved.length > 0; return groups.map((group, gi) => { const start = gi * GROUP + 1; const end = Math.min((gi + 1) * GROUP, data.episodeOutlines.length); const collapsed = hasSaved ? saved!.includes(gi) : gi > 0; const toggle = () => { const s = new Set(hasSaved ? saved! : []); if (collapsed) s.delete(gi); else s.add(gi); update({ collapsedEpisodeGroups: Array.from(s) }) }; return <div key={gi} className="mb-3"><button type="button" className="flex items-center gap-1.5 text-xs font-medium text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 mb-2 transition-colors w-full text-left" onClick={toggle}>{collapsed ? <ChevronRight className="h-3 w-3 shrink-0" /> : <ChevronDown className="h-3 w-3 shrink-0" />}第 {start}-{end} 集（{group.length}集）</button>{!collapsed && <div className="space-y-2">{group.map((ep) => <Card key={ep.episodeNum} className={cn(ep.locked && "opacity-70")}><CardHeader className="pb-2"><div className="flex items-center justify-between"><CardTitle className="text-sm">第{ep.episodeNum}集：{ep.title}{ep.locked ? <span className="cursor-pointer hover:text-red-500" onClick={() => unlockEp(ep.episodeNum)} title="点击解锁"> 🔒</span> : ""}</CardTitle><Button variant="ghost" size="icon" onClick={() => ep.locked ? unlockEp(ep.episodeNum) : delEp(ep.episodeNum)} title="">{ep.locked ? <LockOpen className="h-3.5 w-3.5 text-amber-500 hover:text-emerald-500" /> : <Trash2 className="h-3.5 w-3.5 text-red-500" />}</Button></div></CardHeader><CardContent className="space-y-2"><Input value={ep.title} onChange={(e) => updEp(ep.episodeNum, { title: e.target.value })} placeholder={ep.locked ? "已锁定" : "标题"} disabled={ep.locked} className="h-8 text-sm" /><Textarea value={ep.summary} onChange={(e) => updEp(ep.episodeNum, { summary: e.target.value })} placeholder={ep.locked ? "已锁定" : "本集概要"} disabled={ep.locked} rows={2} className="text-sm" /><Input value={ep.conflict} onChange={(e) => updEp(ep.episodeNum, { conflict: e.target.value })} placeholder={ep.locked ? "已锁定" : "核心冲突"} disabled={ep.locked} className="h-8 text-sm" /><Input value={ep.hook} onChange={(e) => updEp(ep.episodeNum, { hook: e.target.value })} placeholder={ep.locked ? "已锁定" : "结尾钩子"} disabled={ep.locked} className="h-8 text-sm" /></CardContent></Card>)}</div>}</div> }) })()}</div>
             {data.episodeOutlines.length > 0 && <div className="flex justify-end"><Button variant="primary" onClick={next}>保存并继续 <ArrowRight className="h-4 w-4" /></Button></div>}
           </div>}
